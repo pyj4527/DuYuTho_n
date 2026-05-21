@@ -1,0 +1,190 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UploadType {
+  FRIDGE
+  RECEIPT
+  TEXT
+}
+
+enum UploadStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum DetectionStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  CORRECTED
+}
+
+enum InventoryStatus {
+  ACTIVE
+  CONSUMED
+  WASTED
+  EXPIRED
+  DELETED
+}
+
+enum InventorySourceType {
+  MANUAL
+  UPLOAD_DETECTION
+  TEXT
+}
+
+enum ExpiresAtSource {
+  USER
+  PACKAGE_OCR
+  RECEIPT_RULE
+  CATEGORY_DEFAULT
+  UNKNOWN
+}
+
+enum FreshnessSource {
+  IMAGE_AI
+  PURCHASE_DEFAULT
+  USER
+  UNKNOWN
+}
+
+enum PerishabilitySource {
+  INGREDIENT_DEFAULT
+  CATEGORY_DEFAULT
+  USER_ADJUSTED
+  UNKNOWN
+}
+
+model Upload {
+  id           String       @id @default(cuid())
+  userId       String
+  type         UploadType
+  status       UploadStatus @default(PENDING)
+
+  objectKey    String?
+  originalText String?
+
+  processedAt  DateTime?
+  errorMessage String?
+
+  detections   UploadDetection[]
+  inventoryItems InventoryItem[]
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([userId])
+  @@index([type])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model UploadDetection {
+  id        String @id @default(cuid())
+
+  uploadId  String
+  upload    Upload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+
+  detectedName  String
+  correctedName String?
+
+  category String?
+  quantity Float?
+  unit     String?
+  location String?
+
+  expiresAt       DateTime?
+  expiresAtSource ExpiresAtSource @default(UNKNOWN)
+
+  freshnessScore  Int?
+  freshnessSource FreshnessSource @default(UNKNOWN)
+
+  perishabilityScore  Int?
+  perishabilitySource PerishabilitySource @default(UNKNOWN)
+
+  confidence       Float?
+  conditionTags    Json?
+  freshnessSignals Json?
+  rawData          Json?
+
+  status DetectionStatus @default(PENDING)
+
+  inventoryItemId String?        @unique
+  inventoryItem   InventoryItem? @relation("DetectionToInventory", fields: [inventoryItemId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([uploadId])
+  @@index([status])
+  @@index([detectedName])
+}
+
+model InventoryItem {
+  id     String @id @default(cuid())
+  userId String
+
+  name     String
+  category String?
+
+  quantity Float?
+  unit     String?
+  location String?
+
+  expiresAt       DateTime?
+  expiresAtSource ExpiresAtSource @default(UNKNOWN)
+
+  freshnessScore  Int?
+  freshnessSource FreshnessSource @default(UNKNOWN)
+
+  perishabilityScore  Int?
+  perishabilitySource PerishabilitySource @default(UNKNOWN)
+
+  status     InventoryStatus     @default(ACTIVE)
+  sourceType InventorySourceType @default(MANUAL)
+
+  sourceUploadId String?
+  sourceUpload   Upload? @relation(fields: [sourceUploadId], references: [id])
+
+  sourceDetection UploadDetection? @relation("DetectionToInventory")
+
+  wasteEvents WasteEvent[]
+
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([category])
+  @@index([expiresAt])
+  @@index([createdAt])
+}
+
+model WasteEvent {
+  id     String @id @default(cuid())
+  userId String
+
+  inventoryItemId String
+  inventoryItem   InventoryItem @relation(fields: [inventoryItemId], references: [id])
+
+  reason   String?
+  quantity Float?
+  unit     String?
+  note     String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([inventoryItemId])
+  @@index([createdAt])
+}
