@@ -1,6 +1,7 @@
 node_modules/
 
 .env
+.env.clerk.local
 .env.local
 .env.*.local
 
@@ -8,6 +9,8 @@ generated/
 
 *.log
 logs/
+
+.playwright-mcp/
 
 .DS_Store
 Thumbs.db
