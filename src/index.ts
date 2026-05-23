@@ -1,4 +1,4 @@
-import "dotenv/config";
+import "./lib/load-env";
 
 import { app } from "./app";
 
@@ -8,4 +8,5 @@ app.listen(port);
 
 console.log(`Server is running at http://localhost:${port}`);
 console.log(`Swagger UI: http://localhost:${port}/swagger`);
-console.log(`Health check: http://localhost:${port}/health`);
+console.log(`OpenAPI JSON: http://localhost:${port}/api/openapi.json`);
+console.log(`Health check: http://localhost:${port}/api/health`);
