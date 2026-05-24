@@ -12,6 +12,7 @@ import type {
   RecipeListQuery,
   RecipeRecommendationDto,
   RecipeConsumptionLogDto,
+  RecipeStepDto,
 } from "../domain/dto";
 import { recipeConditionKeys } from "../domain/dto";
 import { calculateDaysLeft, toRfc3339 } from "../lib/date";
@@ -41,25 +42,25 @@ export const recipeService = {
     if (query.mode !== "saved") {
       await maybeBackfillCrawledRecipes(householdId, activeItems, selectedIds, query);
     }
-    const catalog = await getCatalog(householdId);
-
-    const filtered = catalog
-      .filter((recipe) => query.mode === "saved" ? recipe.saved : true)
-      .filter((recipe) => matchesRecipeQuery(recipe, query.q))
-      .filter((recipe) => conditions.every((condition) => matchesCondition(recipe, condition, activeItems)));
-
-    const deterministicRecommendations = filtered
-      .map((recipe) => buildRecommendation(recipe, activeItems, selectedSet, conditions))
-      .sort((a, b) => {
-        if (a.match.selectedCount !== b.match.selectedCount) {
-          return b.match.selectedCount - a.match.selectedCount;
-        }
-        if (a.match.matchPercentage !== b.match.matchPercentage) {
-          return b.match.matchPercentage - a.match.matchPercentage;
-        }
-        return a.recipe.name.localeCompare(b.recipe.name, "ko");
-      })
-      .map((recommendation, index) => ({ ...recommendation, rank: index + 1 }));
+    let catalog = await getCatalog(householdId);
+    let deterministicRecommendations = buildDeterministicRecommendations(
+      catalog,
+      query,
+      activeItems,
+      selectedSet,
+      conditions,
+    );
+    if (query.mode !== "saved" && activeItems.length > 0 && deterministicRecommendations.length === 0) {
+      await maybeBackfillInventoryGeneratedRecipes(householdId, activeItems, conditions);
+      catalog = await getCatalog(householdId);
+      deterministicRecommendations = buildDeterministicRecommendations(
+        catalog,
+        query,
+        activeItems,
+        selectedSet,
+        conditions,
+      );
+    }
     const recommendations = await rerankRecommendationsWithOpenAI(
       deterministicRecommendations,
       activeItems,
@@ -454,6 +455,316 @@ async function getActiveInventoryDtos(householdId: string): Promise<InventoryIte
 async function getStoredSelectedIds(householdId: string): Promise<string[]> {
   const selection = await prisma.inventorySelection.findUnique({ where: { householdId } });
   return selection?.selectedIngredientIds ?? [];
+}
+
+function buildDeterministicRecommendations(
+  catalog: RecipeDto[],
+  query: RecipeListQuery,
+  activeItems: InventoryItemDto[],
+  selectedSet: Set<string>,
+  conditions: RecipeConditionKey[],
+): RecipeRecommendationDto[] {
+  return catalog
+    .filter((recipe) => query.mode === "saved" ? recipe.saved : true)
+    .filter((recipe) => matchesRecipeQuery(recipe, query.q))
+    .filter((recipe) => conditions.every((condition) => matchesCondition(recipe, condition, activeItems)))
+    .map((recipe) => buildRecommendation(recipe, activeItems, selectedSet, conditions))
+    .filter((recommendation) => (
+      query.mode === "saved" ||
+      recommendation.match.selectedCount + recommendation.match.ownedCount > 0
+    ))
+    .sort((a, b) => {
+      if (a.match.selectedCount !== b.match.selectedCount) {
+        return b.match.selectedCount - a.match.selectedCount;
+      }
+      if (a.match.matchPercentage !== b.match.matchPercentage) {
+        return b.match.matchPercentage - a.match.matchPercentage;
+      }
+      return a.recipe.name.localeCompare(b.recipe.name, "ko");
+    })
+    .map((recommendation, index) => ({ ...recommendation, rank: index + 1 }));
+}
+
+async function maybeBackfillInventoryGeneratedRecipes(
+  householdId: string,
+  activeItems: InventoryItemDto[],
+  conditions: RecipeConditionKey[],
+): Promise<void> {
+  if (process.env.RECIPE_GENERATED_FALLBACK_ENABLED === "false") {
+    return;
+  }
+
+  const usableItems = activeItems.filter(isUsableRecipeInventoryItem).slice(0, 8);
+  if (usableItems.length === 0) {
+    return;
+  }
+
+  const aiRecipes = await generateInventoryRecipesWithOpenAI(usableItems, conditions);
+  const recipes = aiRecipes.length > 0
+    ? aiRecipes
+    : buildDeterministicInventoryRecipes(usableItems);
+
+  for (const [index, recipe] of recipes.slice(0, 3).entries()) {
+    if (!recipeUsesInventoryIngredient(recipe, usableItems)) {
+      continue;
+    }
+
+    const source = buildInventoryGeneratedSource(recipe, usableItems, index);
+    const existing = await prisma.recipe.findFirst({
+      where: { householdId, source, deletedAt: null },
+      select: { id: true },
+    });
+    if (existing) {
+      continue;
+    }
+
+    await prisma.recipe.create({
+      data: {
+        ...recipeToPrismaCreateInput(householdId, recipe),
+        source,
+        tags: Array.from(new Set([...(recipe.tags ?? []), "inventory_generated"])),
+      },
+    });
+  }
+}
+
+const nonRecipeIngredientTerms = [
+  "사람",
+  "얼굴",
+  "셀카",
+  "손",
+  "person",
+  "face",
+  "selfie",
+  "human",
+  "object",
+  "plate",
+  "bowl",
+  "table",
+];
+
+const pantryIngredients = [
+  { name: "밥", quantity: "1공기", avatar: "rice_bowl" },
+  { name: "간장", quantity: "1큰술", avatar: "soup_kitchen" },
+  { name: "올리브유", quantity: "1큰술", avatar: "soup_kitchen" },
+  { name: "마늘", quantity: "1작은술", avatar: "eco" },
+];
+
+async function generateInventoryRecipesWithOpenAI(
+  items: InventoryItemDto[],
+  conditions: RecipeConditionKey[],
+): Promise<RecipeDto[]> {
+  try {
+    const completion = await createOpenAIJsonCompletion({
+      maxTokens: 2000,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You create practical Korean home-cooking recipe recommendations for an inventory app. Each recipe must use at least one provided edible inventory item exactly by name. You may add only common pantry staples such as rice, salt, soy sauce, oil, garlic, pepper, sugar, vinegar, water, or gochujang. Never include people, faces, selfies, tableware, appliances, or non-food objects as ingredients. Return JSON only.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            inventory: items.map((item) => ({
+              name: item.name,
+              quantity: item.quantity,
+              expiresAt: item.expiresAt,
+              location: item.location,
+            })),
+            conditions,
+            outputShape: {
+              recipes: [{
+                name: "Korean recipe name",
+                ingredients: [{ name: "must include inventory item exact name", quantity: "amount" }],
+                timeMinutes: 15,
+                description: "short Korean description",
+                tags: ["simple"],
+                steps: [{ order: 1, description: "Korean step", durationMinutes: 5 }],
+              }],
+            },
+          }),
+        },
+      ],
+    });
+    if (!completion) {
+      return [];
+    }
+
+    const parsed = parseOpenAIJsonObject(completion.content);
+    const values = Array.isArray(parsed?.recipes) ? parsed.recipes : [];
+    return values
+      .flatMap((value, index) => {
+        const recipe = parseGeneratedRecipe(value, index);
+        return recipe ? [recipe] : [];
+      })
+      .filter((recipe) => recipeUsesInventoryIngredient(recipe, items));
+  } catch {
+    return [];
+  }
+}
+
+function buildDeterministicInventoryRecipes(items: InventoryItemDto[]): RecipeDto[] {
+  return items.slice(0, 3).map((item, index) => {
+    const mainIngredient = {
+      name: item.name,
+      quantity: item.quantity || "적당량",
+      avatar: "restaurant",
+    };
+    const isFishOrMeat = /연어|생선|참치|고기|소고기|돼지|닭|chicken|salmon|fish|beef|pork/iu.test(item.name);
+    const name = isFishOrMeat ? `${item.name} 간장 덮밥` : `${item.name} 소진 볶음`;
+    const steps = isFishOrMeat
+      ? [
+        { order: 1, description: `${item.name}의 물기를 제거하고 먹기 좋은 크기로 준비합니다.`, durationMinutes: 3 },
+        { order: 2, description: "팬에 기름을 두르고 재료를 익힌 뒤 간장과 마늘로 간합니다.", durationMinutes: 8 },
+        { order: 3, description: "밥 위에 올려 남은 양념을 곁들입니다.", durationMinutes: 4 },
+      ]
+      : [
+        { order: 1, description: `${item.name}을 먹기 좋은 크기로 손질합니다.`, durationMinutes: 4 },
+        { order: 2, description: "팬에 기름과 마늘을 두르고 재료를 빠르게 볶습니다.", durationMinutes: 7 },
+        { order: 3, description: "간장으로 간을 맞춰 바로 담아냅니다.", durationMinutes: 3 },
+      ];
+
+    return {
+      id: `generated_${hashString(`${item.id}:${index}`)}`,
+      name,
+      ingredients: [
+        mainIngredient,
+        ...pantryIngredients.slice(0, isFishOrMeat ? 2 : 3),
+      ],
+      saved: false,
+      time: isFishOrMeat ? "15분" : "14분",
+      timeMinutes: isFishOrMeat ? 15 : 14,
+      servings: 1,
+      difficulty: "easy",
+      tags: ["simple", "inventory_generated", isFishOrMeat ? "rice" : "stir_fry"],
+      description: `보관 중인 ${item.name}을 우선 소진하는 빠른 추천 요리입니다.`,
+      steps,
+    };
+  });
+}
+
+function parseGeneratedRecipe(value: unknown, index: number): RecipeDto | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const name = getString(value.name);
+  if (!name) {
+    return null;
+  }
+
+  const ingredients = Array.isArray(value.ingredients)
+    ? value.ingredients.flatMap(parseGeneratedIngredient).slice(0, 12)
+    : [];
+  if (ingredients.length === 0) {
+    return null;
+  }
+
+  const timeMinutes = normalizePositiveInteger(value.timeMinutes) ?? 15;
+  const steps = Array.isArray(value.steps)
+    ? value.steps.flatMap(parseGeneratedStep).slice(0, 10)
+    : [];
+
+  return {
+    id: `generated_ai_${hashString(`${name}:${index}`)}`,
+    name,
+    ingredients,
+    saved: false,
+    time: `${timeMinutes}분`,
+    timeMinutes,
+    servings: normalizePositiveInteger(value.servings) ?? 1,
+    difficulty: parseDifficulty(value.difficulty) ?? "easy",
+    tags: Array.from(new Set(["inventory_generated", ...getStringArray(value.tags)])),
+    description: getString(value.description),
+    steps,
+  };
+}
+
+function parseGeneratedIngredient(value: unknown): RecipeIngredientDto[] {
+  if (!isRecord(value)) {
+    return [];
+  }
+  const name = getString(value.name);
+  if (!name || isBlockedRecipeIngredientName(name)) {
+    return [];
+  }
+  return [{
+    name,
+    quantity: getString(value.quantity) ?? "적당량",
+    avatar: "restaurant",
+  }];
+}
+
+function parseGeneratedStep(value: unknown): RecipeStepDto[] {
+  if (!isRecord(value)) {
+    return [];
+  }
+  const description = getString(value.description);
+  if (!description) {
+    return [];
+  }
+  return [{
+    order: normalizePositiveInteger(value.order) ?? 1,
+    description,
+    durationMinutes: normalizePositiveInteger(value.durationMinutes),
+  }];
+}
+
+function isUsableRecipeInventoryItem(item: InventoryItemDto): boolean {
+  return !isBlockedRecipeIngredientName(item.name);
+}
+
+function isBlockedRecipeIngredientName(name: string): boolean {
+  const normalized = name.trim().toLowerCase();
+  return normalized.length === 0 ||
+    nonRecipeIngredientTerms.some((term) => normalized.includes(term));
+}
+
+function recipeUsesInventoryIngredient(recipe: RecipeDto, items: InventoryItemDto[]): boolean {
+  return recipe.ingredients.some((ingredient) => items.some((item) => {
+    const ingredientName = ingredient.name.toLowerCase();
+    const itemName = item.name.toLowerCase();
+    return ingredientName.includes(itemName) || itemName.includes(ingredientName);
+  }));
+}
+
+function buildInventoryGeneratedSource(
+  recipe: RecipeDto,
+  items: InventoryItemDto[],
+  index: number,
+): string {
+  const itemKey = items.map((item) => item.name.trim().toLowerCase()).sort().join("|");
+  return `generated-inventory:${hashString(`${itemKey}:${recipe.name}:${index}`)}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function getString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function getStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    : [];
+}
+
+function normalizePositiveInteger(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.trunc(value);
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function parseDifficulty(value: unknown): RecipeDto["difficulty"] | undefined {
+  return value === "easy" || value === "medium" || value === "hard" ? value : undefined;
 }
 
 function buildRecommendation(

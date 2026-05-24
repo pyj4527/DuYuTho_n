@@ -36,6 +36,259 @@ const koreanCountWords: Array<[RegExp, string]> = [
 const quantityPattern = /(\d+\s*\/\s*\d+|\d+(?:\.\d+)?|\.\d+)\s*(g|kg|개|팩|송이|장|알|모|봉|병|캔)/gi;
 const relativeDayPattern = /(D\s*-\s*)?(\d+)\s*(일\s*(뒤|후)?|days?|d)/i;
 const isoDatePattern = /\b\d{4}-\d{2}-\d{2}\b/;
+const nonInventoryIngredientTerms = new Set([
+  "사람",
+  "인간",
+  "남자",
+  "여자",
+  "남성",
+  "여성",
+  "아이",
+  "아기",
+  "반려동물",
+  "동물",
+  "강아지",
+  "고양이",
+  "개",
+  "얼굴",
+  "셀카",
+  "셀피",
+  "초상",
+  "신체",
+  "몸",
+  "손",
+  "손가락",
+  "팔",
+  "다리",
+  "머리",
+  "눈",
+  "코",
+  "입",
+  "입술",
+  "피부",
+  "마스크",
+  "안경",
+  "옷",
+  "티셔츠",
+  "셔츠",
+  "바지",
+  "모자",
+  "신발",
+  "가방",
+  "휴대폰",
+  "핸드폰",
+  "스마트폰",
+  "노트북",
+  "컴퓨터",
+  "키보드",
+  "마우스",
+  "모니터",
+  "책상",
+  "의자",
+  "침대",
+  "소파",
+  "자동차",
+  "자전거",
+  "책",
+  "문서",
+  "화면",
+  "창문",
+  "벽",
+  "바닥",
+  "접시",
+  "그릇",
+  "컵",
+  "잔",
+  "포크",
+  "숟가락",
+  "젓가락",
+  "냄비",
+  "프라이팬",
+  "칼",
+  "도마",
+  "냉장고",
+  "영수증",
+  "종이",
+  "메모",
+  "라벨",
+  "텍스트",
+  "글자",
+  "이미지",
+  "사진",
+  "배경",
+  "물건",
+  "객체",
+  "물체",
+  "unknown",
+  "person",
+  "people",
+  "human",
+  "man",
+  "woman",
+  "boy",
+  "girl",
+  "baby",
+  "pet",
+  "animal",
+  "dog",
+  "cat",
+  "face",
+  "selfie",
+  "body",
+  "hand",
+  "finger",
+  "arm",
+  "leg",
+  "head",
+  "eye",
+  "nose",
+  "mouth",
+  "mask",
+  "glasses",
+  "clothes",
+  "shirt",
+  "pants",
+  "hat",
+  "shoes",
+  "bag",
+  "phone",
+  "smartphone",
+  "laptop",
+  "computer",
+  "keyboard",
+  "mouse",
+  "monitor",
+  "desk",
+  "table",
+  "chair",
+  "bed",
+  "sofa",
+  "car",
+  "bicycle",
+  "book",
+  "document",
+  "screen",
+  "window",
+  "wall",
+  "floor",
+  "plate",
+  "bowl",
+  "cup",
+  "fork",
+  "spoon",
+  "chopsticks",
+  "pan",
+  "knife",
+  "fridge",
+  "refrigerator",
+  "receipt",
+  "paper",
+  "memo",
+  "label",
+  "text",
+  "image",
+  "photo",
+  "background",
+  "object",
+  "item",
+].map(normalizeGuardrailTerm));
+const genericInventoryIngredientTerms = new Set([
+  "음식",
+  "식품",
+  "식재료",
+  "재료",
+  "먹을것",
+  "먹을 거",
+  "먹을거",
+  "요리",
+  "반찬",
+  "상품",
+  "제품",
+  "품목",
+  "내용물",
+  "food",
+  "ingredient",
+  "grocery",
+  "groceries",
+  "product",
+  "contents",
+].map(normalizeGuardrailTerm));
+const nonInventoryIngredientTermPattern = new RegExp(
+  [
+    "사람",
+    "인간",
+    "남자",
+    "여자",
+    "남성",
+    "여성",
+    "얼굴",
+    "셀카",
+    "셀피",
+    "신체",
+    "휴대폰",
+    "핸드폰",
+    "스마트폰",
+    "노트북",
+    "키보드",
+    "모니터",
+    "책상",
+    "의자",
+    "자동차",
+    "반려동물",
+    "동물",
+    "강아지",
+    "고양이",
+    "문서",
+    "화면",
+    "창문",
+    "바닥",
+    "냉장고",
+    "영수증",
+    "사진",
+    "배경",
+    "물건",
+    "객체",
+    "물체",
+    "\\bperson\\b",
+    "\\bpeople\\b",
+    "\\bhuman\\b",
+    "\\bman\\b",
+    "\\bwoman\\b",
+    "\\bface\\b",
+    "\\bselfie\\b",
+    "\\bpet\\b",
+    "\\banimal\\b",
+    "\\bdog\\b",
+    "\\bcat\\b",
+    "\\bphone\\b",
+    "\\blaptop\\b",
+    "\\bcomputer\\b",
+    "\\bkeyboard\\b",
+    "\\bdesk\\b",
+    "\\btable\\b",
+    "\\bchair\\b",
+    "\\bcar\\b",
+    "\\bbicycle\\b",
+    "\\bbook\\b",
+    "\\bdocument\\b",
+    "\\bscreen\\b",
+    "\\bwindow\\b",
+    "\\bwall\\b",
+    "\\bfloor\\b",
+    "\\bfridge\\b",
+    "\\brefrigerator\\b",
+    "\\breceipt\\b",
+    "\\bobject\\b",
+  ].join("|"),
+  "i",
+);
+
+class NoInventoryIngredientsFoundError extends Error {
+  constructor() {
+    super("No inventory ingredients found");
+    this.name = "NoInventoryIngredientsFoundError";
+  }
+}
 
 export const lensService = {
   async analyzeText(
@@ -49,13 +302,30 @@ export const lensService = {
     }
 
     const startedAt = Date.now();
-    const aiResult = await analyzeTextWithOpenAI(input.text, baseDate);
+    const aiResult = await analyzeTextWithOpenAI(input.text, baseDate).catch((error: unknown) => {
+      if (error instanceof NoInventoryIngredientsFoundError) {
+        throwNoInventoryIngredientsFound("text");
+      }
+      throw error;
+    });
+    const allowRuleFallback = process.env.LENS_TEXT_ALLOW_RULE_FALLBACK === "true" ||
+      process.env.NODE_ENV !== "production";
+    if (!aiResult && !allowRuleFallback) {
+      throwProblem({
+        status: 503,
+        title: "AI provider unavailable",
+        detail: "OpenAI text analyzer is not configured or returned no usable result",
+      });
+    }
     const localCandidates = aiResult ? [] : parseLensNaturalTextMany(input.text, baseDate);
     const candidates = aiResult?.candidates.length
       ? aiResult.candidates
       : localCandidates.length > 0
         ? localCandidates
-        : [buildFallbackCandidate(input.text, baseDate)];
+        : [];
+    if (candidates.length === 0) {
+      throwNoInventoryIngredientsFound("text");
+    }
     const providerName = aiResult ? "openai-text" : "local-rule-parser";
     const response: LensAnalyzeResponseDto = {
       analysisId: crypto.randomUUID(),
@@ -99,7 +369,12 @@ export const lensService = {
     const source = metadata?.source ?? "upload";
     const maxCandidates = Math.min(Math.max(metadata?.maxCandidates ?? 3, 1), 10);
 
-    const aiResult = await analyzeImageWithOpenAI(image, maxCandidates, metadata?.confidenceThreshold);
+    const aiResult = await analyzeImageWithOpenAI(image, maxCandidates, metadata?.confidenceThreshold).catch((error: unknown) => {
+      if (error instanceof NoInventoryIngredientsFoundError) {
+        throwNoInventoryIngredientsFound("image");
+      }
+      throw error;
+    });
     const allowMockFallback = process.env.LENS_IMAGE_ALLOW_MOCK_FALLBACK === "true";
     if (!aiResult && !allowMockFallback) {
       throwProblem({
@@ -224,13 +499,17 @@ function parseLensNaturalText(rawText: string, baseDate: Date, originalText = ra
 
   const location = parseStorageLocation(text);
   const name = parseIngredientName(text);
+  const candidateName = name || text;
+  if (!isInventoryIngredientName(candidateName)) {
+    return null;
+  }
   const parsedQuantity = parseQuantityFromText(text, getDefaultQuantityUnit(name || text, "개"));
   const expiresAt = parseExpiresAt(text, baseDate);
   const needsReview = !name;
 
   return withSpoilageRisk({
     id: `c_${crypto.randomUUID()}`,
-    name: name || text,
+    name: candidateName,
     quantity: formatQuantityLabel(parsedQuantity.amount, parsedQuantity.unit),
     location,
     expiresAt,
@@ -280,20 +559,6 @@ function parseExpiresAt(text: string, baseDate: Date): string {
   const daysOffset = relativeDay ? Number(relativeDay[2]) : 3;
 
   return getRelativeDateString(Number.isFinite(daysOffset) ? daysOffset : 3, baseDate);
-}
-
-function buildFallbackCandidate(sourceText: string, baseDate: Date): LensCandidateDto {
-  return withSpoilageRisk({
-    id: `c_${crypto.randomUUID()}`,
-    name: sourceText.trim() || "식재료",
-    quantity: "1개",
-    location: "냉장",
-    expiresAt: getRelativeDateString(3, baseDate),
-    confidence: 0.5,
-    sourceText,
-    needsReview: true,
-    reviewReasons: ["ambiguous_name", "missing_quantity", "missing_expiry"],
-  }, { baseDate });
 }
 
 function buildMockImageCandidates(maxCandidates: number): LensCandidateDto[] {
@@ -561,6 +826,9 @@ function parseCandidate(value: unknown): LensCandidateDto[] {
   if (!id || !name || !quantity || !expiresAt) {
     return [];
   }
+  if (!isInventoryIngredientName(name)) {
+    return [];
+  }
 
   const candidate: LensCandidateDto = {
     id,
@@ -662,16 +930,29 @@ async function analyzeTextWithOpenAI(
         {
           role: "system",
           content:
-            "You parse Korean natural-language grocery/fridge text into inventory candidates. Split every ingredient. Do not invent items. Return only JSON.",
+            [
+              "You are the Lens parser for a Korean household inventory app.",
+              "Extract ONLY edible grocery inventory ingredients that a user could store, cook, or consume.",
+              "Allowed examples: raw ingredients, produce, meat, seafood, dairy, eggs, grains, sauces, packaged foods, drinks, frozen foods, leftovers with a specific food name, and food line items from receipts.",
+              "Forbidden examples: people, faces, selfies, body parts, pets, places, appliances, utensils, tableware, containers, packaging-only objects, labels, receipt/paper itself, generic objects, and generic words like food/ingredient/item.",
+              "Never output a person/object/non-food as an item. If the text has no clear edible inventory ingredient, return exactly {\"items\":[]}.",
+              "Use specific Korean canonical ingredient names. Do not invent items. Return only JSON.",
+            ].join(" "),
         },
         {
           role: "user",
           content: JSON.stringify({
             baseDate: baseDateLabel,
             text: rawText,
+            guardrail: {
+              allowed: "Specific edible grocery ingredients only.",
+              forbidden: ["person", "face", "selfie", "body", "pet", "object", "utensil", "tableware", "appliance", "receipt paper", "label", "generic food/item"],
+              noIngredientResponse: { items: [] },
+            },
             outputShape: {
               items: [{
                 name: "Korean canonical ingredient name",
+                isInventoryIngredient: true,
                 quantity: "quantity label such as 1개, 200g, 1/2모",
                 location: "냉장|냉동|실온",
                 expiresAt: "YYYY-MM-DD",
@@ -689,9 +970,12 @@ async function analyzeTextWithOpenAI(
     }
 
     const parsed = parseOpenAIJsonObject(completion.content);
+    if (!parsed) {
+      return null;
+    }
     const items = getItemsArray(parsed);
     if (!items.length) {
-      return null;
+      throw new NoInventoryIngredientsFoundError();
     }
 
     const candidates = items
@@ -699,10 +983,15 @@ async function analyzeTextWithOpenAI(
       .filter((candidate): candidate is LensCandidateDto => candidate !== null)
       .slice(0, 20);
 
-    return candidates.length > 0
-      ? { candidates, model: completion.model, latencyMs: completion.latencyMs }
-      : null;
-  } catch {
+    if (!candidates.length) {
+      throw new NoInventoryIngredientsFoundError();
+    }
+
+    return { candidates, model: completion.model, latencyMs: completion.latencyMs };
+  } catch (error) {
+    if (error instanceof NoInventoryIngredientsFoundError) {
+      throw error;
+    }
     return null;
   }
 }
@@ -734,7 +1023,15 @@ async function analyzeImageWithOpenAI(
         {
           role: "system",
           content:
-            "You analyze food/receipt/fridge images for a Korean household inventory app. Return JSON only. If uncertain, mark review reasons.",
+            [
+              "You are the Lens vision analyzer for a Korean household inventory app.",
+              "Return ONLY edible grocery inventory ingredients that are clearly visible or clearly listed as food on a receipt.",
+              "Allowed examples: produce, meat, seafood, dairy, eggs, grains, sauces, packaged foods, drinks, frozen foods, leftovers with a specific food name, and specific food receipt line items.",
+              "Forbidden examples: people, faces, selfies, body parts, pets, appliances, utensils, tableware, containers, packaging-only objects, labels, receipt/paper itself, generic objects, and generic words like food/ingredient/item.",
+              "Never output '사람', '얼굴', '셀카', 'person', 'face', 'object', tableware, appliances, or any non-food as an item.",
+              "If no edible inventory ingredient is clearly identifiable, return JSON with imageQuality and an empty items array. Do not guess from a selfie or unrelated photo.",
+              "Use specific Korean canonical ingredient names. Return JSON only.",
+            ].join(" "),
         },
         {
           role: "user",
@@ -744,6 +1041,11 @@ async function analyzeImageWithOpenAI(
               text: JSON.stringify({
                 maxCandidates,
                 confidenceThreshold: confidenceThreshold ?? 0.55,
+                guardrail: {
+                  allowed: "Specific edible grocery ingredients only.",
+                  forbidden: ["person", "face", "selfie", "body", "pet", "object", "utensil", "tableware", "appliance", "receipt paper", "label", "generic food/item"],
+                  noIngredientResponse: { imageQuality: { score: "0..1", warnings: [] }, items: [] },
+                },
                 outputShape: {
                   imageQuality: {
                     score: "0..1",
@@ -751,6 +1053,7 @@ async function analyzeImageWithOpenAI(
                   },
                   items: [{
                     name: "Korean canonical food/ingredient name",
+                    isInventoryIngredient: true,
                     quantity: "1팩, 200g, 3개, etc.",
                     location: "냉장|냉동|실온",
                     expiresInDays: "typical remaining shelf-life integer from today",
@@ -763,7 +1066,7 @@ async function analyzeImageWithOpenAI(
             },
             {
               type: "image_url",
-              image_url: { url: dataUri, detail: "low" },
+              image_url: { url: dataUri, detail: "high" },
             },
           ],
         },
@@ -772,8 +1075,11 @@ async function analyzeImageWithOpenAI(
     if (!completion) return null;
 
     const parsed = parseOpenAIJsonObject(completion.content);
+    if (!parsed) {
+      return null;
+    }
     const items = getItemsArray(parsed);
-    if (!items.length) return null;
+    if (!items.length) throw new NoInventoryIngredientsFoundError();
 
     const threshold = Math.max(0, Math.min(1, confidenceThreshold ?? 0.55));
     const imageQuality = isRecord(parsed?.imageQuality) ? parsed.imageQuality : undefined;
@@ -787,11 +1093,11 @@ async function analyzeImageWithOpenAI(
       ))
       : [];
     const candidates = items
-      .slice(0, maxCandidates)
       .map((item) => buildCandidateFromAIRecord(item, new Date(), undefined, threshold, imageQualityWarnings))
-      .filter((candidate): candidate is LensCandidateDto => candidate !== null);
+      .filter((candidate): candidate is LensCandidateDto => candidate !== null)
+      .slice(0, maxCandidates);
     if (candidates.length === 0) {
-      return null;
+      throw new NoInventoryIngredientsFoundError();
     }
 
     return {
@@ -801,7 +1107,10 @@ async function analyzeImageWithOpenAI(
       imageQualityScore: typeof imageQuality?.score === "number" ? imageQuality.score : 0.88,
       imageQualityWarnings,
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof NoInventoryIngredientsFoundError) {
+      throw error;
+    }
     return null;
   }
 }
@@ -810,7 +1119,7 @@ function getItemsArray(parsed: Record<string, unknown> | null): Record<string, u
   if (!parsed) {
     return [];
   }
-  const value = parsed.items ?? parsed.candidates ?? parsed.foods ?? parsed.results;
+  const value = parsed.items ?? parsed.candidates ?? parsed.ingredients ?? parsed.foods ?? parsed.results;
   return Array.isArray(value)
     ? value.filter(isRecord)
     : [];
@@ -825,6 +1134,9 @@ function buildCandidateFromAIRecord(
 ): LensCandidateDto | null {
   const name = getString(record.name) ?? getString(record.normalizedName) ?? getString(record.ingredient);
   if (!name) {
+    return null;
+  }
+  if (record.isInventoryIngredient === false || !isInventoryIngredientName(name) || hasNonInventoryCategory(record)) {
     return null;
   }
   const confidence = typeof record.confidence === "number"
@@ -860,6 +1172,44 @@ function buildCandidateFromAIRecord(
     reviewReasons: uniqueReasons.length > 0 ? uniqueReasons : undefined,
     boundingBox: parseBoundingBox(record.boundingBox),
   }, { baseDate, imageQualityWarnings });
+}
+
+function isInventoryIngredientName(name: string): boolean {
+  const normalizedName = normalizeGuardrailTerm(name);
+  if (!normalizedName || normalizedName.length > 80) {
+    return false;
+  }
+  if (nonInventoryIngredientTerms.has(normalizedName) || genericInventoryIngredientTerms.has(normalizedName)) {
+    return false;
+  }
+  return !nonInventoryIngredientTermPattern.test(name);
+}
+
+function hasNonInventoryCategory(record: Record<string, unknown>): boolean {
+  const values = [
+    getString(record.category),
+    getString(record.type),
+    getString(record.kind),
+    getString(record.label),
+  ];
+  return values.some((value) => value ? !isInventoryIngredientName(value) && nonInventoryIngredientTermPattern.test(value) : false);
+}
+
+function normalizeGuardrailTerm(value: string): string {
+  return value
+    .normalize("NFKC")
+    .replace(/[^\p{L}\p{N}]+/gu, "")
+    .toLowerCase();
+}
+
+function throwNoInventoryIngredientsFound(source: "image" | "text"): never {
+  throwProblem({
+    status: 422,
+    title: "No inventory ingredients found",
+    detail: source === "image"
+      ? "Lens는 식재료만 등록합니다. 음식, 냉장고 선반, 포장 식품, 식품 영수증을 다시 촬영하세요."
+      : "Lens는 식재료만 등록합니다. 음식명, 포장 식품, 식품 영수증 항목만 입력하세요.",
+  });
 }
 
 function toInputJsonObject(value: LensAnalyzeResponseDto): Prisma.InputJsonObject {

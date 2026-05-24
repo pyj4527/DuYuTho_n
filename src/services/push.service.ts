@@ -11,12 +11,7 @@ let webPush: typeof import("web-push") | undefined;
 
 try {
   webPush = await import("web-push");
-  const subject = process.env.VAPID_SUBJECT;
-  const publicKey = process.env.VAPID_PUBLIC_KEY;
-  const privateKey = process.env.VAPID_PRIVATE_KEY;
-  if (subject && publicKey && privateKey) {
-    webPush.setVapidDetails(subject, publicKey, privateKey);
-  }
+  configureWebPushClient();
 } catch {
   webPush = undefined;
 }
@@ -123,8 +118,17 @@ export const pushService = {
       });
     }
 
-    if (!webPush) {
-      return { queued: true, sent: 0, failed: 0, inactiveIds: [] };
+    if (subscriptions.length === 0) {
+      throwProblem({ status: 404, title: "Not found", detail: "No active push subscriptions" });
+    }
+
+    const pushClient = configureWebPushClient();
+    if (!pushClient) {
+      throwProblem({
+        status: 503,
+        title: "Push provider unavailable",
+        detail: "VAPID keys are not configured on the server",
+      });
     }
 
     const payload = JSON.stringify({
@@ -150,7 +154,7 @@ export const pushService = {
       };
 
       try {
-        await webPush.sendNotification(pushSubscription, payload);
+        await pushClient.sendNotification(pushSubscription, payload);
         await prisma.pushSubscription.update({
           where: { id: subscription.id },
           data: { lastSuccessAt: new Date() },
@@ -159,7 +163,7 @@ export const pushService = {
       } catch (error: unknown) {
         failed++;
         const statusCode = getPushErrorStatusCode(error);
-        if (statusCode === 404 || statusCode === 410) {
+        if (shouldDeactivatePushSubscription(statusCode)) {
           await prisma.pushSubscription.update({
             where: { id: subscription.id },
             data: { active: false, lastFailureAt: new Date() },
@@ -178,6 +182,22 @@ export const pushService = {
   },
 };
 
+function configureWebPushClient(): typeof import("web-push") | undefined {
+  if (!webPush) {
+    return undefined;
+  }
+
+  const subject = process.env.VAPID_SUBJECT?.trim();
+  const publicKey = process.env.VAPID_PUBLIC_KEY?.trim();
+  const privateKey = process.env.VAPID_PRIVATE_KEY?.trim();
+  if (!subject || !publicKey || !privateKey) {
+    return undefined;
+  }
+
+  webPush.setVapidDetails(subject, publicKey, privateKey);
+  return webPush;
+}
+
 function getPushErrorStatusCode(error: unknown): number | undefined {
   if (typeof error !== "object" || error === null || !("statusCode" in error)) {
     return undefined;
@@ -185,6 +205,10 @@ function getPushErrorStatusCode(error: unknown): number | undefined {
 
   const { statusCode } = error;
   return typeof statusCode === "number" ? statusCode : undefined;
+}
+
+function shouldDeactivatePushSubscription(statusCode: number | undefined): boolean {
+  return statusCode === 400 || statusCode === 403 || statusCode === 404 || statusCode === 410;
 }
 
 function validateSubscription(input: PushSubscriptionUpsertRequestDto): void {
