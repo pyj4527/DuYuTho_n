@@ -5,6 +5,7 @@ import type {
 } from "../domain/dto";
 import { mapPushSubscription } from "../mappers/push.mapper";
 import { throwProblem } from "../lib/problem";
+import { isAllowedPushEndpoint } from "../lib/push-endpoint-policy";
 import { ensureHousehold } from "./household.service";
 
 let webPush: typeof import("web-push") | undefined;
@@ -212,25 +213,17 @@ function shouldDeactivatePushSubscription(statusCode: number | undefined): boole
 }
 
 function validateSubscription(input: PushSubscriptionUpsertRequestDto): void {
-  if (!isHttpsUrl(input.subscription.endpoint)) {
-    throwProblem({ status: 422, title: "Validation error", detail: "push endpoint must be an HTTPS URL" });
+  if (!isAllowedPushEndpoint(input.subscription.endpoint)) {
+    throwProblem({
+      status: 422,
+      title: "Validation error",
+      detail: "push endpoint must be an HTTPS URL from an approved Web Push provider",
+    });
   }
   if (!base64UrlPattern.test(input.subscription.keys.p256dh)) {
     throwProblem({ status: 422, title: "Validation error", detail: "keys.p256dh must be URL-safe base64" });
   }
   if (!base64UrlPattern.test(input.subscription.keys.auth)) {
     throwProblem({ status: 422, title: "Validation error", detail: "keys.auth must be URL-safe base64" });
-  }
-}
-
-function isHttpsUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:";
-  } catch (error) {
-    if (error instanceof TypeError) {
-      return false;
-    }
-    throw error;
   }
 }

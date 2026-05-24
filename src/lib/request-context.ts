@@ -169,8 +169,8 @@ function getAuthorizedParties(request: Request): string[] | undefined {
   return origin ? [origin] : undefined;
 }
 
-function isAnonymousHouseholdAllowed(): boolean {
-  return process.env.NODE_ENV !== "production" || process.env.ALLOW_ANONYMOUS_HOUSEHOLD === "true";
+export function isAnonymousHouseholdAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.NODE_ENV !== "production" && env.ALLOW_ANONYMOUS_HOUSEHOLD === "true";
 }
 
 function getHouseholdIdForClerkUser(userId: string): string {

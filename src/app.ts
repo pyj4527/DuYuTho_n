@@ -97,7 +97,7 @@ export const app = new Elysia()
               scheme: "bearer",
               bearerFormat: "JWT",
               description:
-                "Clerk session token sent as Authorization: Bearer <token>. Clerk SDKs issue short-lived session JWTs and rotate them client-side; expired, revoked, signed-out, or otherwise invalidated sessions fail verification with 401. Backend verification also pins the token authorized party (azp) to CLERK_AUTHORIZED_PARTIES. Development/local demo can explicitly enable ALLOW_ANONYMOUS_HOUSEHOLD=true for fallback household scoping.",
+                "Clerk session token sent as Authorization: Bearer <token>. Clerk SDKs issue short-lived session JWTs and rotate them client-side; expired, revoked, signed-out, or otherwise invalidated sessions fail verification with 401. Backend verification also pins the token authorized party (azp) to CLERK_AUTHORIZED_PARTIES. Non-production local demos can explicitly enable ALLOW_ANONYMOUS_HOUSEHOLD=true for fallback household scoping; production always requires Clerk bearer authentication.",
             },
           },
           schemas: {

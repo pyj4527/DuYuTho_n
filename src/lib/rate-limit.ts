@@ -1,5 +1,6 @@
 import { getRequestContext } from "./request-context";
 import { createProblem, problemResponse } from "./problem";
+import { isIP } from "node:net";
 
 type RateLimitRule = {
   name: string;
@@ -57,7 +58,7 @@ export function enforceRateLimit(request: Request, requestId: string): Response 
   }
 
   const now = Date.now();
-  const key = `${rule.name}:${getHouseholdKey(request)}:${getClientIp(request)}`;
+  const key = `${rule.name}:${getHouseholdKey(request)}:${resolveRateLimitClientIp(request)}`;
   const existing = buckets.get(key);
   const bucket = existing && existing.resetAt > now
     ? existing
@@ -91,7 +92,30 @@ function getHouseholdKey(request: Request): string {
   return getRequestContext(request).householdId;
 }
 
-function getClientIp(request: Request): string {
-  const forwardedFor = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return forwardedFor || request.headers.get("cf-connecting-ip")?.trim() || "local";
+export function resolveRateLimitClientIp(request: Request, env: NodeJS.ProcessEnv = process.env): string {
+  const cloudflareIp = getHeaderIp(request.headers.get("cf-connecting-ip"));
+  if (cloudflareIp) {
+    return cloudflareIp;
+  }
+
+  if (shouldTrustForwardedFor(env)) {
+    const forwardedFor = getHeaderIp(request.headers.get("x-forwarded-for")?.split(",")[0]);
+    if (forwardedFor) {
+      return forwardedFor;
+    }
+  }
+
+  return "local";
+}
+
+function shouldTrustForwardedFor(env: NodeJS.ProcessEnv): boolean {
+  return env.NODE_ENV !== "production" || env.RATE_LIMIT_TRUST_X_FORWARDED_FOR === "true";
+}
+
+function getHeaderIp(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed.length > 128 || !isIP(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
 }

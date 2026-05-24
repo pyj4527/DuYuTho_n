@@ -14,7 +14,8 @@
     "db:generate": "bunx --bun prisma generate",
     "db:validate": "bunx --bun prisma validate",
     "db:migrate": "bunx --bun prisma migrate dev",
-    "db:studio": "bunx --bun prisma studio"
+    "db:studio": "bunx --bun prisma studio",
+    "test": "bun test"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",

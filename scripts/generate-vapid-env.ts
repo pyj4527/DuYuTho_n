@@ -26,7 +26,7 @@ const backendLocalProductionValues: EnvValues = {
   NODE_ENV: "production",
   CORS_ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:4173,http://localhost:5173,http://127.0.0.1:4173,http://127.0.0.1:5173",
   FRONTEND_DIST_DIR: "../frontend/dist",
-  ALLOW_ANONYMOUS_HOUSEHOLD: "true",
+  ALLOW_ANONYMOUS_HOUSEHOLD: "false",
   VAPID_SUBJECT: "mailto:local-production@example.invalid",
 };
 
