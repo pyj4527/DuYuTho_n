@@ -21,6 +21,8 @@ import { prisma } from "../lib/prisma";
 import { mapInventoryItem } from "../mappers/inventory.mapper";
 import { mapConsumptionLog, mapRecipe } from "../mappers/recipe.mapper";
 import { ensureHousehold } from "./household.service";
+import { recipeCrawlerService, type CrawledRecipeCandidate } from "./recipe-crawler.service";
+import { createOpenAIJsonCompletion, parseOpenAIJsonObject } from "./openai.service";
 
 const defaultLimit = 50;
 
@@ -29,20 +31,24 @@ export const recipeService = {
     householdId: string,
     query: RecipeListQuery = {},
   ): Promise<PageDto<RecipeRecommendationDto>> {
-    const catalog = await getCatalog(householdId);
+    await ensureHousehold(householdId);
     const activeItems = await getActiveInventoryDtos(householdId);
     const selectedIds = query.selectedIngredientIds?.length
       ? query.selectedIngredientIds
       : await getStoredSelectedIds(householdId);
     const selectedSet = new Set(selectedIds);
     const conditions = normalizeConditions(query.conditions);
+    if (query.mode !== "saved") {
+      await maybeBackfillCrawledRecipes(householdId, activeItems, selectedIds, query);
+    }
+    const catalog = await getCatalog(householdId);
 
     const filtered = catalog
       .filter((recipe) => query.mode === "saved" ? recipe.saved : true)
       .filter((recipe) => matchesRecipeQuery(recipe, query.q))
       .filter((recipe) => conditions.every((condition) => matchesCondition(recipe, condition, activeItems)));
 
-    const recommendations = filtered
+    const deterministicRecommendations = filtered
       .map((recipe) => buildRecommendation(recipe, activeItems, selectedSet, conditions))
       .sort((a, b) => {
         if (a.match.selectedCount !== b.match.selectedCount) {
@@ -54,6 +60,11 @@ export const recipeService = {
         return a.recipe.name.localeCompare(b.recipe.name, "ko");
       })
       .map((recommendation, index) => ({ ...recommendation, rank: index + 1 }));
+    const recommendations = await rerankRecommendationsWithOpenAI(
+      deterministicRecommendations,
+      activeItems,
+      conditions,
+    );
 
     const limit = normalizeLimit(query.limit);
     const startIndex = query.cursor
@@ -79,6 +90,21 @@ export const recipeService = {
     selectedIngredientIds: string[] = [],
   ): Promise<RecipeRecommendationDto> {
     const recipe = await findRecipeOrThrow(householdId, recipeId);
+    const activeItems = await getActiveInventoryDtos(householdId);
+    const selectedSet = new Set(selectedIngredientIds.length > 0
+      ? selectedIngredientIds
+      : await getStoredSelectedIds(householdId));
+
+    return buildRecommendation(recipe, activeItems, selectedSet, []);
+  },
+
+  async importRecipeFromUrl(
+    householdId: string,
+    url: string,
+    selectedIngredientIds: string[] = [],
+  ): Promise<RecipeRecommendationDto> {
+    await ensureHousehold(householdId);
+    const recipe = await importCrawledRecipe(householdId, url);
     const activeItems = await getActiveInventoryDtos(householdId);
     const selectedSet = new Set(selectedIngredientIds.length > 0
       ? selectedIngredientIds
@@ -265,6 +291,149 @@ async function getCatalog(householdId: string): Promise<RecipeDto[]> {
   return Array.from(catalog.values());
 }
 
+async function importCrawledRecipe(householdId: string, url: string): Promise<RecipeDto> {
+  const crawled = await recipeCrawlerService.crawlAndNormalize(url);
+  const source = buildCrawledSource(crawled.sourceUrl);
+  const existing = await prisma.recipe.findFirst({
+    where: { householdId, source, deletedAt: null },
+  });
+  const saved = await getSavedState(householdId, existing?.id);
+
+  if (existing) {
+    return mapRecipe(existing, saved ?? existing.saved);
+  }
+
+  const recipe = crawledRecipeToDto(crawled, false);
+  const created = await prisma.recipe.create({
+    data: {
+      ...recipeToPrismaCreateInput(householdId, recipe),
+      source,
+      tags: Array.from(new Set([...(recipe.tags ?? []), "web_crawled"])),
+    },
+  });
+
+  return mapRecipe(created, false);
+}
+
+async function getSavedState(householdId: string, recipeId: string | undefined): Promise<boolean | undefined> {
+  if (!recipeId) {
+    return undefined;
+  }
+  const save = await prisma.recipeSave.findUnique({
+    where: { householdId_recipeId: { householdId, recipeId } },
+  });
+  return save?.saved;
+}
+
+function crawledRecipeToDto(crawled: CrawledRecipeCandidate, saved: boolean): RecipeDto {
+  return {
+    id: `web_${hashString(crawled.sourceUrl)}`,
+    name: crawled.name,
+    ingredients: crawled.ingredients,
+    saved,
+    time: crawled.time,
+    timeMinutes: crawled.timeMinutes,
+    description: crawled.description,
+    imageUrl: crawled.imageUrl,
+    servings: crawled.servings,
+    difficulty: crawled.difficulty,
+    tags: crawled.tags,
+    dietaryFlags: crawled.dietaryFlags,
+    steps: crawled.steps,
+    nutrition: crawled.nutrition,
+  };
+}
+
+async function maybeBackfillCrawledRecipes(
+  householdId: string,
+  activeItems: InventoryItemDto[],
+  selectedIds: string[],
+  query: RecipeListQuery,
+): Promise<void> {
+  if (process.env.RECIPE_AUTO_CRAWL_ENABLED === "false") {
+    return;
+  }
+
+  const targetCount = Number(process.env.RECIPE_AUTO_CRAWL_TARGET_COUNT ?? 6);
+  const existingCount = await prisma.recipe.count({
+    where: { householdId, deletedAt: null, source: { startsWith: "crawled:" } },
+  });
+  if (existingCount >= targetCount) {
+    return;
+  }
+
+  const selectedSet = new Set(selectedIds);
+  const searchTerms = buildRecipeSearchTerms(activeItems, selectedSet, query).slice(0, 2);
+  const maxImports = Math.max(0, targetCount - existingCount);
+  let imported = 0;
+
+  for (const term of searchTerms) {
+    if (imported >= maxImports) break;
+    const urls = await recipeCrawlerService.discoverRecipeUrls(term, 4).catch(() => []);
+    for (const url of urls) {
+      if (imported >= maxImports) break;
+      const alreadyExists = await prisma.recipe.findFirst({
+        where: { householdId, source: buildCrawledSource(url), deletedAt: null },
+        select: { id: true },
+      });
+      if (alreadyExists) {
+        continue;
+      }
+      try {
+        await importCrawledRecipe(householdId, url);
+        imported += 1;
+      } catch {
+        continue;
+      }
+    }
+  }
+}
+
+function buildRecipeSearchTerms(
+  activeItems: InventoryItemDto[],
+  selectedSet: Set<string>,
+  query: RecipeListQuery,
+): string[] {
+  const explicitQuery = query.q?.trim();
+  const selectedNames = activeItems
+    .filter((item) => selectedSet.has(item.id))
+    .map((item) => item.name);
+  const expiringNames = activeItems
+    .filter((item) => {
+      const daysLeft = calculateDaysLeft(item.expiresAt);
+      return daysLeft >= 0 && daysLeft <= 3;
+    })
+    .map((item) => item.name);
+  const stockedNames = activeItems.map((item) => item.name);
+
+  return Array.from(new Set([
+    explicitQuery,
+    ...selectedNames,
+    ...expiringNames,
+    ...stockedNames,
+  ].filter((term): term is string => typeof term === "string" && term.trim().length > 0)))
+    .slice(0, 5);
+}
+
+function buildCrawledSource(url: string): string {
+  return `crawled:${normalizeCrawledUrl(url)}`;
+}
+
+function normalizeCrawledUrl(url: string): string {
+  const parsed = new URL(url);
+  parsed.hash = "";
+  parsed.searchParams.sort();
+  return parsed.toString();
+}
+
+function hashString(value: string): string {
+  let hash = 5381;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 33) ^ value.charCodeAt(index);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 async function findRecipeOrThrow(householdId: string, recipeId: string): Promise<RecipeDto> {
   const recipe = (await getCatalog(householdId)).find((candidate) => candidate.id === recipeId);
   if (!recipe) {
@@ -316,6 +485,102 @@ function buildRecommendation(
     rank: 0,
     reasons,
   };
+}
+
+async function rerankRecommendationsWithOpenAI(
+  recommendations: RecipeRecommendationDto[],
+  items: InventoryItemDto[],
+  conditions: RecipeConditionKey[],
+): Promise<RecipeRecommendationDto[]> {
+  if (
+    process.env.RECIPE_AI_RERANK_ENABLED === "false" ||
+    recommendations.length <= 1
+  ) {
+    return recommendations.map((recommendation, index) => ({ ...recommendation, rank: index + 1 }));
+  }
+
+  try {
+    const candidates = recommendations.slice(0, Number(process.env.RECIPE_AI_RERANK_MAX_CANDIDATES ?? 20));
+    const completion = await createOpenAIJsonCompletion({
+      maxTokens: 1600,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You rerank real/crawled recipes for a Korean household inventory app. Prefer selected and expiring ingredients, fewer missing ingredients, shorter requested time, and allergy/dislike exclusions already filtered by backend. Return JSON only.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            inventory: items.map((item) => ({
+              id: item.id,
+              name: item.name,
+              quantity: item.quantity,
+              expiresAt: item.expiresAt,
+              location: item.location,
+            })).slice(0, 60),
+            conditions,
+            candidates: candidates.map((recommendation) => ({
+              id: recommendation.recipe.id,
+              name: recommendation.recipe.name,
+              timeMinutes: recommendation.recipe.timeMinutes,
+              tags: recommendation.recipe.tags ?? [],
+              ingredients: recommendation.match.ingredients.map((ingredient) => ({
+                name: ingredient.name,
+                status: ingredient.status,
+              })),
+              matchPercentage: recommendation.match.matchPercentage,
+              selectedCount: recommendation.match.selectedCount,
+              ownedCount: recommendation.match.ownedCount,
+            })),
+            outputShape: {
+              ranked: [{ id: "recipe id", reason: "short Korean reason grounded in inventory match" }],
+            },
+          }),
+        },
+      ],
+    });
+    if (!completion) {
+      return recommendations.map((recommendation, index) => ({ ...recommendation, rank: index + 1 }));
+    }
+
+    const parsed = parseOpenAIJsonObject(completion.content);
+    const ranked = Array.isArray(parsed?.ranked) ? parsed.ranked.filter(isRankedRecipeRecord) : [];
+    if (ranked.length === 0) {
+      return recommendations.map((recommendation, index) => ({ ...recommendation, rank: index + 1 }));
+    }
+
+    const order = new Map(ranked.map((item, index) => [item.id, index]));
+    const aiReasons = new Map(ranked.map((item) => [item.id, item.reason]));
+    return recommendations
+      .map((recommendation, originalIndex) => ({ recommendation, originalIndex }))
+      .sort((left, right) => {
+        const leftOrder = order.get(left.recommendation.recipe.id);
+        const rightOrder = order.get(right.recommendation.recipe.id);
+        if (leftOrder !== undefined && rightOrder !== undefined) return leftOrder - rightOrder;
+        if (leftOrder !== undefined) return -1;
+        if (rightOrder !== undefined) return 1;
+        return left.originalIndex - right.originalIndex;
+      })
+      .map(({ recommendation }, index) => {
+        const reason = aiReasons.get(recommendation.recipe.id);
+        return {
+          ...recommendation,
+          rank: index + 1,
+          reasons: reason ? [reason, ...recommendation.reasons] : recommendation.reasons,
+        };
+      });
+  } catch {
+    return recommendations.map((recommendation, index) => ({ ...recommendation, rank: index + 1 }));
+  }
+}
+
+function isRankedRecipeRecord(value: unknown): value is { id: string; reason: string } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return typeof record.id === "string" && typeof record.reason === "string";
 }
 
 function matchIngredient(

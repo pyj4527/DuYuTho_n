@@ -86,6 +86,14 @@ export const inventoryItemSchema = t.Object({
   version: t.Optional(t.Number()),
 });
 
+export const spoilageRiskSchema = t.Object({
+  level: t.Union([t.Literal("low"), t.Literal("medium"), t.Literal("high"), t.Literal("critical")]),
+  score: t.Number({ minimum: 0, maximum: 1 }),
+  daysLeft: t.Number(),
+  reasons: t.Array(t.String()),
+  recommendation: t.String(),
+});
+
 export const inventoryPageSchema = t.Object({
   data: t.Array(inventoryItemSchema),
   page: pageMetaSchema,
@@ -158,6 +166,9 @@ export const inventoryBatchCreateResultSchema = t.Object({
           t.Literal("same_normalized_name"),
         ]),
         confidence: t.Number({ minimum: 0, maximum: 1 }),
+        candidateRisk: t.Optional(spoilageRiskSchema),
+        existingRisk: t.Optional(spoilageRiskSchema),
+        recommendation: t.Optional(t.String()),
       }),
     ),
   ),
@@ -273,6 +284,7 @@ export const lensCandidateSchema = t.Object({
       height: t.Number(),
     }),
   ),
+  spoilageRisk: t.Optional(spoilageRiskSchema),
 });
 
 export const lensAnalyzeTextBodySchema = t.Object(
@@ -318,7 +330,17 @@ export const lensAnalyzeImageBodySchema = t.Object({
     type: ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"],
     maxSize: "10m",
   }),
-  metadata: t.Optional(t.String()),
+  metadata: t.Optional(t.Union([
+    t.String(),
+    t.Object({
+      source: t.Optional(t.Union([t.Literal("camera"), t.Literal("upload"), t.Literal("simulator")])),
+      timezone: t.Optional(t.String()),
+      clientCapturedAt: t.Optional(t.String()),
+      languageHints: t.Optional(t.Array(t.String())),
+      maxCandidates: t.Optional(t.Number()),
+      confidenceThreshold: t.Optional(t.Number()),
+    }),
+  ])),
 });
 
 export const recipeIngredientSchema = t.Object({
@@ -380,6 +402,14 @@ export const recipeListQuerySchema = t.Object({
   cursor: t.Optional(t.String()),
   limit: t.Optional(t.Numeric({ minimum: 1, maximum: 100 })),
 });
+
+export const recipeImportBodySchema = t.Object(
+  {
+    url: t.String({ minLength: 1, maxLength: 2048 }),
+    selectedIngredientIds: t.Optional(t.Array(t.String())),
+  },
+  { additionalProperties: false },
+);
 
 export const recipeSavedBodySchema = t.Object(
   {

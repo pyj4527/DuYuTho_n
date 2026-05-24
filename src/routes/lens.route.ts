@@ -50,7 +50,7 @@ export const lensRoute = new Elysia({ prefix: "/lens" })
     {
       body: lensAnalyzeImageBodySchema,
       response: lensAnalyzeResponseSchema,
-      detail: { tags: ["Lens"], summary: "Safe scaffold/mock image analyzer" },
+      detail: { tags: ["Lens"], summary: "Analyze food image with backend AI vision" },
     },
   )
   .get(

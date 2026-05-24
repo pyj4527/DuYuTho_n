@@ -164,7 +164,7 @@ function applySecurityHeaders(headers: Record<string, string | number | string[]
   headers["x-content-type-options"] = "nosniff";
   headers["referrer-policy"] = "strict-origin-when-cross-origin";
   headers["permissions-policy"] = "camera=(self), microphone=(), geolocation=()";
-  headers["content-security-policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https:; worker-src 'self'; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
+  headers["content-security-policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https: https://cloudflareinsights.com; worker-src 'self'; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
   if (process.env.NODE_ENV === "production") {
     headers["strict-transport-security"] = "max-age=31536000; includeSubDomains";
   }

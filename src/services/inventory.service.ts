@@ -16,6 +16,7 @@ import type {
 } from "../domain/dto";
 import { calculateDaysLeft, getRelativeDateString, isIsoLocalDateString, toRfc3339 } from "../lib/date";
 import { parseQuantityNumberAndUnit } from "../lib/quantity";
+import { computeSpoilageRisk } from "../lib/spoilage-risk";
 import { mapInventoryItem } from "../mappers/inventory.mapper";
 import { ensureHousehold } from "./household.service";
 import { throwProblem } from "../lib/problem";
@@ -94,7 +95,7 @@ export const inventoryService = {
 
     const existing = await prisma.inventoryItem.findMany({
       where: { householdId, status: "active" },
-      select: { id: true, name: true },
+      select: { id: true, name: true, location: true, expiresAt: true },
     });
     const duplicateSuggestions = buildDuplicateSuggestions(input.items, existing);
     const created = await prisma.$transaction(
@@ -355,21 +356,92 @@ function buildOrderBy(
 
 function buildDuplicateSuggestions(
   candidates: InventoryItemCreateDto[],
-  existing: Array<{ id: string; name: string }>,
+  existing: Array<{ id: string; name: string; location: string; expiresAt: string }>,
 ): DuplicateSuggestionDto[] {
   return candidates.flatMap((candidate) => {
     const normalizedCandidateName = normalizeForDuplicate(candidate.name);
-    const exact = existing.find((item) => normalizeForDuplicate(item.name) === normalizedCandidateName);
-    return exact
-      ? [{
-        candidateName: candidate.name,
-        existingItemId: exact.id,
-        existingName: exact.name,
-        reason: "same_normalized_name" as const,
-        confidence: 0.95,
-      }]
-      : [];
+    const match = findDuplicateMatch(normalizedCandidateName, existing);
+    if (!match) {
+      return [];
+    }
+    const { item, reason, confidence } = match;
+    const candidateRisk = computeSpoilageRisk({
+      name: candidate.name,
+      location: candidate.location,
+      expiresAt: candidate.expiresAt,
+    });
+    const existingRisk = computeSpoilageRisk({
+      name: item.name,
+      location: item.location === "냉동" || item.location === "실온" ? item.location : "냉장",
+      expiresAt: item.expiresAt,
+    });
+
+    return [{
+      candidateName: candidate.name,
+      existingItemId: item.id,
+      existingName: item.name,
+      reason,
+      confidence: Math.min(confidence, riskSimilarityConfidence(candidateRisk.score, existingRisk.score)),
+      candidateRisk,
+      existingRisk,
+      recommendation: duplicateRiskRecommendation(candidateRisk.level, existingRisk.level),
+    }];
   });
+}
+
+function findDuplicateMatch(
+  normalizedCandidateName: string,
+  existing: Array<{ id: string; name: string; location: string; expiresAt: string }>,
+): {
+  item: { id: string; name: string; location: string; expiresAt: string };
+  reason: DuplicateSuggestionDto["reason"];
+  confidence: number;
+} | null {
+  const exact = existing.find((item) => normalizeForDuplicate(item.name) === normalizedCandidateName);
+  if (exact) {
+    return { item: exact, reason: "same_normalized_name", confidence: 0.95 };
+  }
+
+  const similar = existing
+    .map((item) => ({
+      item,
+      score: duplicateNameSimilarity(normalizedCandidateName, normalizeForDuplicate(item.name)),
+    }))
+    .filter((candidate) => candidate.score >= 0.72)
+    .sort((left, right) => right.score - left.score)[0];
+
+  return similar
+    ? { item: similar.item, reason: "similar_name", confidence: Number(similar.score.toFixed(2)) }
+    : null;
+}
+
+function duplicateNameSimilarity(left: string, right: string): number {
+  if (!left || !right) return 0;
+  if (left.includes(right) || right.includes(left)) {
+    return Math.min(left.length, right.length) / Math.max(left.length, right.length);
+  }
+  const leftChars = new Set(Array.from(left));
+  const rightChars = new Set(Array.from(right));
+  const intersection = Array.from(leftChars).filter((character) => rightChars.has(character)).length;
+  const union = new Set([...leftChars, ...rightChars]).size;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function riskSimilarityConfidence(candidateScore: number, existingScore: number): number {
+  return Number((1 - Math.min(Math.abs(candidateScore - existingScore), 0.4) * 0.25).toFixed(2));
+}
+
+function duplicateRiskRecommendation(
+  candidateLevel: NonNullable<DuplicateSuggestionDto["candidateRisk"]>["level"],
+  existingLevel: NonNullable<DuplicateSuggestionDto["existingRisk"]>["level"],
+): string {
+  if (candidateLevel === "critical" || existingLevel === "critical") {
+    return "중복 가능성이 높고 위험도가 높습니다. 기존 재료 상태를 먼저 확인한 뒤 병합하거나 폐기하세요.";
+  }
+  if (candidateLevel === "high" || existingLevel === "high") {
+    return "중복 가능성이 높습니다. 소비기한이 더 임박한 재료부터 사용하세요.";
+  }
+  return "같은 재료로 보입니다. 수량 병합 여부를 확인하세요.";
 }
 
 function normalizeForDuplicate(value: string): string {

@@ -11,27 +11,9 @@ import { formatQuantityLabel, getDefaultQuantityUnit, parseQuantityFromText } fr
 import { getRelativeDateString, isIsoLocalDateString, parseLocalDate } from "../lib/date";
 import { getString, isRecord, parseJsonObject } from "../lib/json";
 import { throwProblem } from "../lib/problem";
+import { computeSpoilageRisk } from "../lib/spoilage-risk";
 import { ensureHousehold } from "./household.service";
-
-let openaiClient: Awaited<ReturnType<typeof createOpenAIClient>> | undefined;
-
-async function createOpenAIClient() {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return undefined;
-  try {
-    const { default: OpenAI } = await import("openai");
-    return new OpenAI({ apiKey });
-  } catch {
-    return undefined;
-  }
-}
-
-async function getOpenAIClient() {
-  if (openaiClient === undefined) {
-    openaiClient = await createOpenAIClient();
-  }
-  return openaiClient;
-}
+import { createOpenAIJsonCompletion, parseOpenAIJsonObject } from "./openai.service";
 
 const maxImageBytes = 10 * 1024 * 1024;
 const maxImagePixels = 24_000_000;
@@ -45,6 +27,7 @@ const acceptedMimeTypes = new Set([
 ]);
 
 const koreanCountWords: Array<[RegExp, string]> = [
+  [/반\s*(개|팩|송이|장|알|모|봉|병|캔)/g, "1/2$1"],
   [/한\s*(개|팩|송이|장|알|모|봉|병|캔)/g, "1$1"],
   [/두\s*(개|팩|송이|장|알|모|봉|병|캔)/g, "2$1"],
   [/세\s*(개|팩|송이|장|알|모|봉|병|캔)/g, "3$1"],
@@ -65,8 +48,15 @@ export const lensService = {
       throwProblem({ status: 422, title: "Validation error", detail: "baseDate must be YYYY-MM-DD" });
     }
 
-    const parsed = parseLensNaturalText(input.text, baseDate);
-    const candidates = parsed ? [parsed] : [buildFallbackCandidate(input.text, baseDate)];
+    const startedAt = Date.now();
+    const aiResult = await analyzeTextWithOpenAI(input.text, baseDate);
+    const localCandidates = aiResult ? [] : parseLensNaturalTextMany(input.text, baseDate);
+    const candidates = aiResult?.candidates.length
+      ? aiResult.candidates
+      : localCandidates.length > 0
+        ? localCandidates
+        : [buildFallbackCandidate(input.text, baseDate)];
+    const providerName = aiResult ? "openai-text" : "local-rule-parser";
     const response: LensAnalyzeResponseDto = {
       analysisId: crypto.randomUUID(),
       status: candidates.some((candidate) => candidate.needsReview) ? "needs_review" : "completed",
@@ -74,8 +64,9 @@ export const lensService = {
       candidates,
       rawText: input.text,
       provider: {
-        name: "local-rule-parser",
-        model: "frontend-compatible-v1",
+        name: providerName,
+        model: aiResult?.model ?? "server-rule-parser-v2",
+        latencyMs: aiResult?.latencyMs ?? Date.now() - startedAt,
       },
     };
 
@@ -87,7 +78,7 @@ export const lensService = {
         source: response.source,
         rawText: input.text,
         result: toInputJsonObject(response),
-        providerName: "local-rule-parser",
+        providerName,
       },
     });
 
@@ -100,7 +91,7 @@ export const lensService = {
   async analyzeImage(
     householdId: string,
     image: File,
-    metadataRaw: string | undefined,
+    metadataRaw: string | Record<string, unknown> | undefined,
   ): Promise<LensAnalyzeResponseDto> {
     await ensureHousehold(householdId);
     await validateImageFile(image);
@@ -108,10 +99,18 @@ export const lensService = {
     const source = metadata?.source ?? "upload";
     const maxCandidates = Math.min(Math.max(metadata?.maxCandidates ?? 3, 1), 10);
 
-    const aiCandidates = await analyzeImageWithOpenAI(image, maxCandidates);
-    const candidates = aiCandidates ?? buildMockImageCandidates(maxCandidates);
-    const providerName = aiCandidates ? "openai-vision" : "safe-mock-image-analyzer";
-    const model = aiCandidates ? (process.env.OPENAI_VISION_MODEL || "gpt-4o-mini") : "scaffold-v1";
+    const aiResult = await analyzeImageWithOpenAI(image, maxCandidates, metadata?.confidenceThreshold);
+    const allowMockFallback = process.env.LENS_IMAGE_ALLOW_MOCK_FALLBACK === "true";
+    if (!aiResult && !allowMockFallback) {
+      throwProblem({
+        status: 503,
+        title: "AI provider unavailable",
+        detail: "OpenAI image analyzer is not configured or returned no usable result",
+      });
+    }
+    const candidates = aiResult?.candidates ?? buildMockImageCandidates(maxCandidates);
+    const providerName = aiResult ? "openai-vision" : "safe-mock-image-analyzer";
+    const model = aiResult?.model ?? "scaffold-v1";
     const needsReview = candidates.some((c) => c.needsReview);
     const response: LensAnalyzeResponseDto = {
       analysisId: crypto.randomUUID(),
@@ -119,12 +118,13 @@ export const lensService = {
       source,
       candidates,
       imageQuality: {
-        score: aiCandidates ? 0.88 : 0.82,
-        warnings: [],
+        score: aiResult?.imageQualityScore ?? 0.82,
+        warnings: aiResult?.imageQualityWarnings ?? [],
       },
       provider: {
         name: providerName,
         model,
+        latencyMs: aiResult?.latencyMs,
       },
     };
 
@@ -169,7 +169,54 @@ export const lensService = {
   },
 };
 
-function parseLensNaturalText(rawText: string, baseDate: Date): LensCandidateDto | null {
+function parseLensNaturalTextMany(rawText: string, baseDate: Date): LensCandidateDto[] {
+  return splitNaturalTextSegments(rawText)
+    .map((segment) => parseLensNaturalText(segment, baseDate, rawText))
+    .filter((candidate): candidate is LensCandidateDto => candidate !== null)
+    .filter((candidate, index, candidates) => (
+      candidates.findIndex((other) => other.normalizedName === candidate.normalizedName) === index
+    ))
+    .slice(0, 20);
+}
+
+function splitNaturalTextSegments(rawText: string): string[] {
+  const normalized = normalizeKoreanCountWords(rawText)
+    .replace(/\r\n/g, "\n")
+    .replace(/[，、;]/g, ",")
+    .replace(/\s+(그리고|및|하고)\s+/g, ",")
+    .replace(/(\S)랑\s+/g, "$1,");
+  const direct = normalized
+    .split(/[\n,]+/g)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+
+  if (direct.length > 1) {
+    return direct;
+  }
+
+  return splitByExpiryBoundaries(normalized);
+}
+
+function splitByExpiryBoundaries(text: string): string[] {
+  const segments: string[] = [];
+  let start = 0;
+  const pattern = /(?:\d{4}-\d{2}-\d{2}|(?:D\s*-\s*)?\d+\s*(?:일\s*(?:뒤|후)?|days?|d))(?:\s+|$)/gi;
+  for (const match of text.matchAll(pattern)) {
+    const end = (match.index ?? 0) + match[0].length;
+    const segment = text.slice(start, end).trim();
+    if (segment) {
+      segments.push(segment);
+    }
+    start = end;
+  }
+  const tail = text.slice(start).trim();
+  if (tail) {
+    segments.push(tail);
+  }
+  return segments.length > 0 ? segments : [text.trim()].filter(Boolean);
+}
+
+function parseLensNaturalText(rawText: string, baseDate: Date, originalText = rawText): LensCandidateDto | null {
   const text = normalizeKoreanCountWords(rawText.trim());
   if (!text) {
     return null;
@@ -181,18 +228,18 @@ function parseLensNaturalText(rawText: string, baseDate: Date): LensCandidateDto
   const expiresAt = parseExpiresAt(text, baseDate);
   const needsReview = !name;
 
-  return {
+  return withSpoilageRisk({
     id: `c_${crypto.randomUUID()}`,
     name: name || text,
     quantity: formatQuantityLabel(parsedQuantity.amount, parsedQuantity.unit),
     location,
     expiresAt,
     confidence: needsReview ? 0.62 : 0.9,
-    sourceText: rawText,
+    sourceText: originalText === rawText ? rawText : text,
     normalizedName: (name || text).replace(/\s+/g, "").toLowerCase(),
     needsReview: needsReview || undefined,
     reviewReasons: needsReview ? ["ambiguous_name"] : undefined,
-  };
+  }, { baseDate });
 }
 
 function normalizeKoreanCountWords(text: string): string {
@@ -217,7 +264,7 @@ function parseIngredientName(text: string): string {
     .replace(quantityPattern, " ")
     .replace(relativeDayPattern, " ")
     .replace(isoDatePattern, " ")
-    .replace(/냉장|냉동|실온|보관|까지|소비기한|유통기한/gi, " ")
+    .replace(/냉장|냉동|실온|보관|까지|소비기한|유통기한|있어|있음|남음|샀어|구매|먹어야|써야/gi, " ")
     .replace(/[,.，。]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -236,7 +283,7 @@ function parseExpiresAt(text: string, baseDate: Date): string {
 }
 
 function buildFallbackCandidate(sourceText: string, baseDate: Date): LensCandidateDto {
-  return {
+  return withSpoilageRisk({
     id: `c_${crypto.randomUUID()}`,
     name: sourceText.trim() || "식재료",
     quantity: "1개",
@@ -246,12 +293,12 @@ function buildFallbackCandidate(sourceText: string, baseDate: Date): LensCandida
     sourceText,
     needsReview: true,
     reviewReasons: ["ambiguous_name", "missing_quantity", "missing_expiry"],
-  };
+  }, { baseDate });
 }
 
 function buildMockImageCandidates(maxCandidates: number): LensCandidateDto[] {
   const candidates: LensCandidateDto[] = [
-    {
+    withSpoilageRisk({
       id: `c_${crypto.randomUUID()}`,
       name: "방울토마토",
       quantity: "1팩",
@@ -260,8 +307,8 @@ function buildMockImageCandidates(maxCandidates: number): LensCandidateDto[] {
       confidence: 0.86,
       needsReview: true,
       reviewReasons: ["duplicate_possible"],
-    },
-    {
+    }),
+    withSpoilageRisk({
       id: `c_${crypto.randomUUID()}`,
       name: "연어 필렛",
       quantity: "200g",
@@ -270,15 +317,15 @@ function buildMockImageCandidates(maxCandidates: number): LensCandidateDto[] {
       confidence: 0.78,
       needsReview: true,
       reviewReasons: ["low_confidence"],
-    },
-    {
+    }),
+    withSpoilageRisk({
       id: `c_${crypto.randomUUID()}`,
       name: "브로콜리",
       quantity: "1송이",
       location: "냉장",
       expiresAt: getRelativeDateString(4),
       confidence: 0.88,
-    },
+    }),
   ];
 
   return candidates.slice(0, maxCandidates);
@@ -417,13 +464,13 @@ function matchesAscii(bytes: Uint8Array, offset: number, value: string): boolean
   return Array.from(value).every((character, index) => bytes[offset + index] === character.charCodeAt(0));
 }
 
-function parseMetadata(metadataRaw: string | undefined): LensAnalyzeMetadataDto | null {
+function parseMetadata(metadataRaw: string | Record<string, unknown> | undefined): LensAnalyzeMetadataDto | null {
   if (!metadataRaw) {
     return null;
   }
 
-  const parsed = parseJsonObject(metadataRaw);
-  if (!parsed) {
+  const parsed = typeof metadataRaw === "string" ? parseJsonObject(metadataRaw) : metadataRaw;
+  if (!parsed || !isRecord(parsed)) {
     throwProblem({ status: 400, title: "Malformed JSON", detail: "metadata must be a JSON object string" });
   }
 
@@ -464,6 +511,41 @@ function parseLensAnalyzeResponse(value: unknown): LensAnalyzeResponseDto | null
     source,
     candidates: value.candidates.flatMap(parseCandidate),
     rawText: getString(value.rawText),
+    imageQuality: parseImageQuality(value.imageQuality),
+    provider: parseProvider(value.provider),
+  };
+}
+
+function parseImageQuality(value: unknown): LensAnalyzeResponseDto["imageQuality"] | undefined {
+  if (!isRecord(value) || typeof value.score !== "number") {
+    return undefined;
+  }
+  return {
+    score: value.score,
+    warnings: Array.isArray(value.warnings)
+      ? value.warnings.filter((warning): warning is "blur" | "glare" | "too_dark" | "too_far" | "rotated" => (
+        warning === "blur" ||
+        warning === "glare" ||
+        warning === "too_dark" ||
+        warning === "too_far" ||
+        warning === "rotated"
+      ))
+      : [],
+  };
+}
+
+function parseProvider(value: unknown): LensAnalyzeResponseDto["provider"] | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const name = getString(value.name);
+  if (!name) {
+    return undefined;
+  }
+  return {
+    name,
+    model: getString(value.model),
+    latencyMs: typeof value.latencyMs === "number" ? value.latencyMs : undefined,
   };
 }
 
@@ -480,7 +562,7 @@ function parseCandidate(value: unknown): LensCandidateDto[] {
     return [];
   }
 
-  return [{
+  const candidate: LensCandidateDto = {
     id,
     name,
     quantity,
@@ -490,13 +572,154 @@ function parseCandidate(value: unknown): LensCandidateDto[] {
     sourceText: getString(value.sourceText),
     normalizedName: getString(value.normalizedName),
     needsReview: typeof value.needsReview === "boolean" ? value.needsReview : undefined,
-  }];
+    reviewReasons: Array.isArray(value.reviewReasons)
+      ? value.reviewReasons.filter(isReviewReason)
+      : undefined,
+    boundingBox: parseBoundingBox(value.boundingBox),
+    spoilageRisk: parseSpoilageRisk(value.spoilageRisk),
+  };
+
+  return [candidate.spoilageRisk ? candidate : withSpoilageRisk(candidate)];
 }
 
-async function analyzeImageWithOpenAI(image: File, maxCandidates: number): Promise<LensCandidateDto[] | null> {
-  const client = await getOpenAIClient();
-  if (!client) return null;
+function isReviewReason(value: unknown): value is NonNullable<LensCandidateDto["reviewReasons"]>[number] {
+  return value === "low_confidence" ||
+    value === "missing_quantity" ||
+    value === "missing_expiry" ||
+    value === "ambiguous_name" ||
+    value === "duplicate_possible";
+}
 
+function parseBoundingBox(value: unknown): LensCandidateDto["boundingBox"] | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const { x, y, width, height } = value;
+  return typeof x === "number" && typeof y === "number" && typeof width === "number" && typeof height === "number"
+    ? { x, y, width, height }
+    : undefined;
+}
+
+function parseSpoilageRisk(value: unknown): LensCandidateDto["spoilageRisk"] | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const level = value.level === "low" || value.level === "medium" || value.level === "high" || value.level === "critical"
+    ? value.level
+    : undefined;
+  if (!level || typeof value.score !== "number" || typeof value.daysLeft !== "number") {
+    return undefined;
+  }
+  return {
+    level,
+    score: value.score,
+    daysLeft: value.daysLeft,
+    reasons: Array.isArray(value.reasons)
+      ? value.reasons.filter(isSpoilageRiskReason)
+      : [],
+    recommendation: getString(value.recommendation) ?? "",
+  };
+}
+
+function isSpoilageRiskReason(
+  value: unknown,
+): value is NonNullable<LensCandidateDto["spoilageRisk"]>["reasons"][number] {
+  return value === "expires_soon" ||
+    value === "expired" ||
+    value === "room_temp_sensitive" ||
+    value === "short_fridge_life" ||
+    value === "freezer_safe" ||
+    value === "low_confidence" ||
+    value === "image_quality_warning";
+}
+
+function withSpoilageRisk(
+  candidate: LensCandidateDto,
+  options: { baseDate?: Date; imageQualityWarnings?: string[] } = {},
+): LensCandidateDto {
+  return {
+    ...candidate,
+    spoilageRisk: computeSpoilageRisk({
+      name: candidate.name,
+      location: candidate.location,
+      expiresAt: candidate.expiresAt,
+      confidence: candidate.confidence,
+      imageQualityWarnings: options.imageQualityWarnings,
+      baseDate: options.baseDate,
+    }),
+  };
+}
+
+async function analyzeTextWithOpenAI(
+  rawText: string,
+  baseDate: Date,
+): Promise<{ candidates: LensCandidateDto[]; model: string; latencyMs: number } | null> {
+  const baseDateLabel = getRelativeDateString(0, baseDate);
+  try {
+    const completion = await createOpenAIJsonCompletion({
+      maxTokens: 1400,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You parse Korean natural-language grocery/fridge text into inventory candidates. Split every ingredient. Do not invent items. Return only JSON.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            baseDate: baseDateLabel,
+            text: rawText,
+            outputShape: {
+              items: [{
+                name: "Korean canonical ingredient name",
+                quantity: "quantity label such as 1개, 200g, 1/2모",
+                location: "냉장|냉동|실온",
+                expiresAt: "YYYY-MM-DD",
+                confidence: "0..1",
+                sourceText: "source phrase",
+                reviewReasons: ["low_confidence|missing_quantity|missing_expiry|ambiguous_name"],
+              }],
+            },
+          }),
+        },
+      ],
+    });
+    if (!completion) {
+      return null;
+    }
+
+    const parsed = parseOpenAIJsonObject(completion.content);
+    const items = getItemsArray(parsed);
+    if (!items.length) {
+      return null;
+    }
+
+    const candidates = items
+      .map((item) => buildCandidateFromAIRecord(item, baseDate, rawText))
+      .filter((candidate): candidate is LensCandidateDto => candidate !== null)
+      .slice(0, 20);
+
+    return candidates.length > 0
+      ? { candidates, model: completion.model, latencyMs: completion.latencyMs }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+type ImageAnalysisResult = {
+  candidates: LensCandidateDto[];
+  model: string;
+  latencyMs: number;
+  imageQualityScore: number;
+  imageQualityWarnings: Array<"blur" | "glare" | "too_dark" | "too_far" | "rotated">;
+};
+
+async function analyzeImageWithOpenAI(
+  image: File,
+  maxCandidates: number,
+  confidenceThreshold: number | undefined,
+): Promise<ImageAnalysisResult | null> {
   const model = process.env.OPENAI_VISION_MODEL || "gpt-4o-mini";
 
   try {
@@ -504,15 +727,39 @@ async function analyzeImageWithOpenAI(image: File, maxCandidates: number): Promi
     const base64 = Buffer.from(bytes).toString("base64");
     const dataUri = `data:${image.type};base64,${base64}`;
 
-    const response = await client.chat.completions.create({
+    const completion = await createOpenAIJsonCompletion({
       model,
+      maxTokens: 1200,
       messages: [
+        {
+          role: "system",
+          content:
+            "You analyze food/receipt/fridge images for a Korean household inventory app. Return JSON only. If uncertain, mark review reasons.",
+        },
         {
           role: "user",
           content: [
             {
               type: "text",
-              text: `Analyze this food image and return a JSON object with a key "items" containing up to ${maxCandidates} detected food items. Each item must have: name (Korean food name), quantity (e.g. "1팩", "200g", "3개"), location (냉장/냉동/실온), expiresInDays (integer, typical shelf life), confidence (0.0-1.0). Return ONLY valid JSON with no markdown.`,
+              text: JSON.stringify({
+                maxCandidates,
+                confidenceThreshold: confidenceThreshold ?? 0.55,
+                outputShape: {
+                  imageQuality: {
+                    score: "0..1",
+                    warnings: ["blur", "glare", "too_dark", "too_far", "rotated"],
+                  },
+                  items: [{
+                    name: "Korean canonical food/ingredient name",
+                    quantity: "1팩, 200g, 3개, etc.",
+                    location: "냉장|냉동|실온",
+                    expiresInDays: "typical remaining shelf-life integer from today",
+                    confidence: "0..1",
+                    reviewReasons: ["low_confidence|missing_quantity|ambiguous_name"],
+                    boundingBox: { x: "0..1", y: "0..1", width: "0..1", height: "0..1" },
+                  }],
+                },
+              }),
             },
             {
               type: "image_url",
@@ -521,43 +768,98 @@ async function analyzeImageWithOpenAI(image: File, maxCandidates: number): Promi
           ],
         },
       ],
-      response_format: { type: "json_object" },
-      max_tokens: 1000,
     });
+    if (!completion) return null;
 
-    const content = response.choices[0]?.message?.content;
-    if (!content) return null;
+    const parsed = parseOpenAIJsonObject(completion.content);
+    const items = getItemsArray(parsed);
+    if (!items.length) return null;
 
-    const parsed = JSON.parse(content);
-    const items = Array.isArray(parsed) ? parsed : parsed.items ?? parsed.candidates ?? parsed.foods ?? parsed.results ?? [];
-    if (!Array.isArray(items)) return null;
+    const threshold = Math.max(0, Math.min(1, confidenceThreshold ?? 0.55));
+    const imageQuality = isRecord(parsed?.imageQuality) ? parsed.imageQuality : undefined;
+    const imageQualityWarnings = Array.isArray(imageQuality?.warnings)
+      ? imageQuality.warnings.filter((warning): warning is "blur" | "glare" | "too_dark" | "too_far" | "rotated" => (
+        warning === "blur" ||
+        warning === "glare" ||
+        warning === "too_dark" ||
+        warning === "too_far" ||
+        warning === "rotated"
+      ))
+      : [];
+    const candidates = items
+      .slice(0, maxCandidates)
+      .map((item) => buildCandidateFromAIRecord(item, new Date(), undefined, threshold, imageQualityWarnings))
+      .filter((candidate): candidate is LensCandidateDto => candidate !== null);
+    if (candidates.length === 0) {
+      return null;
+    }
 
-    return items.slice(0, maxCandidates).map((item: unknown): LensCandidateDto => {
-      const record = isRecord(item) ? item : {};
-      const confidence = typeof record.confidence === "number" ? Math.max(0, Math.min(1, record.confidence)) : 0.75;
-      const expiresInDays = Number(record.expiresInDays) || 3;
-      const location: StorageLocation = record.location === "냉동" || record.location === "실온" ? record.location : "냉장";
-      const needsReview = confidence < 0.8 || !record.name || !record.quantity;
-
-      const reasons: Array<"low_confidence" | "ambiguous_name" | "missing_quantity"> = [];
-      if (confidence < 0.8) reasons.push("low_confidence");
-      if (!record.name) reasons.push("ambiguous_name");
-      if (!record.quantity) reasons.push("missing_quantity");
-
-      return {
-        id: `c_${crypto.randomUUID()}`,
-        name: String(record.name || "식재료"),
-        quantity: String(record.quantity || "1개"),
-        location,
-        expiresAt: getRelativeDateString(expiresInDays),
-        confidence,
-        needsReview: needsReview || undefined,
-        reviewReasons: reasons.length > 0 ? reasons : undefined,
-      };
-    });
+    return {
+      candidates,
+      model: completion.model,
+      latencyMs: completion.latencyMs,
+      imageQualityScore: typeof imageQuality?.score === "number" ? imageQuality.score : 0.88,
+      imageQualityWarnings,
+    };
   } catch {
     return null;
   }
+}
+
+function getItemsArray(parsed: Record<string, unknown> | null): Record<string, unknown>[] {
+  if (!parsed) {
+    return [];
+  }
+  const value = parsed.items ?? parsed.candidates ?? parsed.foods ?? parsed.results;
+  return Array.isArray(value)
+    ? value.filter(isRecord)
+    : [];
+}
+
+function buildCandidateFromAIRecord(
+  record: Record<string, unknown>,
+  baseDate: Date,
+  fallbackSourceText: string | undefined,
+  confidenceThreshold = 0.55,
+  imageQualityWarnings: string[] = [],
+): LensCandidateDto | null {
+  const name = getString(record.name) ?? getString(record.normalizedName) ?? getString(record.ingredient);
+  if (!name) {
+    return null;
+  }
+  const confidence = typeof record.confidence === "number"
+    ? Math.max(0, Math.min(1, record.confidence))
+    : 0.72;
+  const quantity = getString(record.quantity) ?? "1개";
+  const location: StorageLocation = record.location === "냉동" || record.location === "실온" ? record.location : "냉장";
+  const expiresAtInput = getString(record.expiresAt);
+  const expiresAt = expiresAtInput && isIsoLocalDateString(expiresAtInput)
+    ? expiresAtInput
+    : getRelativeDateString(Number(record.expiresInDays) || 3, baseDate);
+  const reviewReasons = Array.isArray(record.reviewReasons)
+    ? record.reviewReasons.filter(isReviewReason)
+    : [];
+  if (confidence < Math.max(0.8, confidenceThreshold)) {
+    reviewReasons.push("low_confidence");
+  }
+  if (!getString(record.quantity)) {
+    reviewReasons.push("missing_quantity");
+  }
+
+  const uniqueReasons = Array.from(new Set(reviewReasons));
+  return withSpoilageRisk({
+    id: `c_${crypto.randomUUID()}`,
+    name,
+    quantity,
+    location,
+    expiresAt,
+    confidence,
+    sourceText: getString(record.sourceText) ?? fallbackSourceText,
+    normalizedName: name.replace(/\s+/g, "").toLowerCase(),
+    needsReview: uniqueReasons.length > 0 || undefined,
+    reviewReasons: uniqueReasons.length > 0 ? uniqueReasons : undefined,
+    boundingBox: parseBoundingBox(record.boundingBox),
+  }, { baseDate, imageQualityWarnings });
 }
 
 function toInputJsonObject(value: LensAnalyzeResponseDto): Prisma.InputJsonObject {

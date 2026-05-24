@@ -108,6 +108,9 @@ export type DuplicateSuggestionDto = {
   existingName: string;
   reason: "same_name" | "similar_name" | "same_normalized_name";
   confidence: number;
+  candidateRisk?: SpoilageRiskDto;
+  existingRisk?: SpoilageRiskDto;
+  recommendation?: string;
 };
 
 export type InventoryBatchCreateResultDto = {
@@ -187,6 +190,22 @@ export type BoundingBoxDto = {
   height: number;
 };
 
+export type SpoilageRiskDto = {
+  level: "low" | "medium" | "high" | "critical";
+  score: number;
+  daysLeft: number;
+  reasons: Array<
+    | "expires_soon"
+    | "expired"
+    | "room_temp_sensitive"
+    | "short_fridge_life"
+    | "freezer_safe"
+    | "low_confidence"
+    | "image_quality_warning"
+  >;
+  recommendation: string;
+};
+
 export type LensCandidateDto = {
   id: string;
   name: string;
@@ -205,6 +224,7 @@ export type LensCandidateDto = {
     | "duplicate_possible"
   >;
   boundingBox?: BoundingBoxDto;
+  spoilageRisk?: SpoilageRiskDto;
 };
 
 export type LensAnalyzeMetadataDto = {
@@ -319,6 +339,11 @@ export type RecipeListQuery = {
   q?: string;
   cursor?: string;
   limit?: number;
+};
+
+export type RecipeImportRequestDto = {
+  url: string;
+  selectedIngredientIds?: string[];
 };
 
 export type RecipeConsumeRequestDto = {

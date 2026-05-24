@@ -37,6 +37,12 @@ const rules: RateLimitRule[] = [
     match: (request) => isMethodPath(request, "POST", "/api/v1/push/test"),
   },
   {
+    name: "recipe_import",
+    limit: Number(process.env.RATE_LIMIT_RECIPE_IMPORT_PER_HOUR ?? 20),
+    windowMs: hourMs,
+    match: (request) => isMethodPath(request, "POST", "/api/v1/recipes/import"),
+  },
+  {
     name: "prototype_import",
     limit: Number(process.env.RATE_LIMIT_PROTOTYPE_IMPORT_PER_DAY ?? 20),
     windowMs: dayMs,

@@ -85,14 +85,16 @@ is listed in `CORS_ALLOWED_ORIGINS`.
 ## API contract notes
 
 - Mutating POST endpoints accept `Idempotency-Key` and replay matching responses for 24 hours.
-- Lens image/text, push test, and prototype import endpoints have in-memory scaffold rate limits from `.env.example`.
+- Lens image/text, recipe import, push test, and prototype import endpoints have in-memory scaffold rate limits from `.env.example`.
 - Development uses `DEFAULT_HOUSEHOLD_ID` for anonymous household scoping. In `NODE_ENV=production`, `/api/v1/*` rejects this fallback unless `ALLOW_ANONYMOUS_HOUSEHOLD=true` is explicitly set for a controlled demo deployment.
 - Configure `CORS_ALLOWED_ORIGINS` for split-origin clients. With an empty value, development only allows localhost app/API origins.
 - Clerk-authenticated clients send `Authorization: Bearer <Clerk session token>` to `/api/v1/*`. The backend scopes data to `clerk_<userId>` households after verifying the token with `CLERK_SECRET_KEY` or optional `CLERK_JWT_KEY`; `CLERK_PUBLISHABLE_KEY` is kept server-side here only for CLI/doctor parity.
 - Local production testing uses explicit localhost CORS and `CLERK_AUTHORIZED_PARTIES` origins. `bun run env:local-production` writes `ALLOW_ANONYMOUS_HOUSEHOLD=true` only to ignored local `.env` for controlled demo testing; keep it `false` for real production.
 - Run `clerk env pull --app app_3DvEjj2KXF5R4igeuu7OYcqtlmX --file .env.clerk.local` from this backend when you need Clerk development keys locally. The server loads `.env` first and ignored `.env.clerk.local` second so Clerk keys do not overwrite DB/VAPID settings. Never expose `CLERK_SECRET_KEY` to frontend code.
 - Web Push subscription setup needs `VAPID_PUBLIC_KEY`; actual push delivery also needs `VAPID_PRIVATE_KEY` and `VAPID_SUBJECT` kept on the backend only. The backend now sends real VAPID-signed push notifications via the `web-push` library; inactive subscriptions (404/410) are automatically cleaned up.
-- Lens image analysis uses OpenAI Vision when `OPENAI_API_KEY` is configured (`OPENAI_VISION_MODEL` defaults to `gpt-4o-mini`). Without a key, it falls back to the safe mock analyzer.
+- Lens image analysis uses OpenAI Vision (`OPENAI_VISION_MODEL`, default `gpt-4o-mini`) and returns `503` if no usable AI result is available. Set `LENS_IMAGE_ALLOW_MOCK_FALLBACK=true` only for local demos.
+- Lens natural-language text analysis uses OpenAI (`OPENAI_TEXT_MODEL`) when configured, with a backend rule parser fallback for multi-ingredient text.
+- Recipe recommendations can crawl real recipe pages (`POST /api/v1/recipes/import`) and auto-backfill from allowed recipe hosts for stocked/selected ingredients. `RECIPE_CRAWL_ALLOWED_HOSTS` defaults to `10000recipe.com,www.10000recipe.com`; OpenAI reranks recipe matches when `OPENAI_API_KEY` is configured.
 
 ## Verification
 

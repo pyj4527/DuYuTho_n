@@ -9,6 +9,7 @@ import {
   recipeConsumeResultSchema,
   recipeConsumptionLogPageSchema,
   recipeDtoSchema,
+  recipeImportBodySchema,
   recipeIdParamsSchema,
   recipeListQuerySchema,
   pageQuerySchema,
@@ -41,6 +42,29 @@ export const recipeRoute = new Elysia({ prefix: "/recipes" })
       query: pageQuerySchema,
       response: recipeConsumptionLogPageSchema,
       detail: { tags: ["Recipes"], summary: "Recent recipe consumption logs" },
+    },
+  )
+  .post(
+    "/import",
+    ({ body, request, set }) => {
+      const context = getRequestContext(request);
+      return runIdempotentJson({
+        householdId: context.householdId,
+        request,
+        set,
+        body,
+        successStatus: 201,
+        operation: () => recipeService.importRecipeFromUrl(
+          context.householdId,
+          body.url,
+          body.selectedIngredientIds ?? [],
+        ),
+      });
+    },
+    {
+      body: recipeImportBodySchema,
+      response: recipeRecommendationSchema,
+      detail: { tags: ["Recipes"], summary: "Crawl a real recipe URL and import it for recommendations" },
     },
   )
   .get(
