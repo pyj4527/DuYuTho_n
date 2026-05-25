@@ -94,6 +94,41 @@ export const spoilageRiskSchema = t.Object({
   recommendation: t.String(),
 });
 
+export const spoilageWeatherContextSchema = t.Object({
+  observedAt: t.String(),
+  source: t.Union([t.Literal("open_meteo"), t.Literal("seasonal_fallback")]),
+  locationLabel: t.String(),
+  temperatureC: t.Number(),
+  relativeHumidity: t.Number(),
+  season: t.Union([t.Literal("spring"), t.Literal("summer"), t.Literal("autumn"), t.Literal("winter")]),
+  riskLevel: t.Union([t.Literal("normal"), t.Literal("elevated"), t.Literal("high")]),
+  freshnessWindowAdjustmentDays: t.Number(),
+  recommendation: t.String(),
+});
+
+export const inventorySpoilageRiskReportSchema = t.Object({
+  generatedAt: t.String(),
+  weather: spoilageWeatherContextSchema,
+  summary: t.Object({
+    totalItemsCount: t.Number(),
+    highRiskCount: t.Number(),
+    criticalRiskCount: t.Number(),
+    weatherRiskLevel: t.Union([t.Literal("normal"), t.Literal("elevated"), t.Literal("high")]),
+    title: t.String(),
+    body: t.String(),
+  }),
+  items: t.Array(t.Object({
+    item: inventoryItemSchema,
+    spoilageRisk: spoilageRiskSchema,
+    weatherImpact: t.Object({
+      scoreDelta: t.Number(),
+      adjustedDaysLeft: t.Number(),
+      reasons: t.Array(t.String()),
+      recommendation: t.String(),
+    }),
+  })),
+});
+
 export const inventoryPageSchema = t.Object({
   data: t.Array(inventoryItemSchema),
   page: pageMetaSchema,
@@ -773,6 +808,14 @@ export const notificationDispatchResultSchema = t.Object({
     url: t.Optional(t.String()),
   })),
 });
+
+export const spoilageRiskDispatchResultSchema = t.Composite([
+  notificationDispatchResultSchema,
+  t.Object({
+    householdsScanned: t.Number(),
+    householdsNotified: t.Number(),
+  }),
+]);
 
 export const prototypeImportBodySchema = t.Object({
   source: t.Literal("prototype-store"),

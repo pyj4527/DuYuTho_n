@@ -1,10 +1,12 @@
 import "./lib/load-env";
 
 import { app } from "./app";
+import { startSpoilageRiskCron } from "./jobs/spoilage-risk-cron";
 
 const port = Number(process.env.PORT ?? 3000);
 
 app.listen(port);
+startSpoilageRiskCron();
 
 console.log(`Server is running at http://localhost:${port}`);
 console.log(`Swagger UI: http://localhost:${port}/swagger`);

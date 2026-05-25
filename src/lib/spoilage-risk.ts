@@ -1,4 +1,4 @@
-import type { SpoilageRiskDto, StorageLocation } from "../domain/dto";
+import type { SpoilageRiskDto, SpoilageWeatherContextDto, StorageLocation } from "../domain/dto";
 import { calculateDaysLeft } from "./date";
 
 type SpoilageRiskInput = {
@@ -8,6 +8,7 @@ type SpoilageRiskInput = {
   confidence?: number;
   imageQualityWarnings?: string[];
   baseDate?: Date;
+  weather?: SpoilageWeatherContextDto;
 };
 
 const sensitiveFoodPatterns = [
@@ -56,6 +57,16 @@ export function computeSpoilageRisk(input: SpoilageRiskInput): SpoilageRiskDto {
     score += 0.08;
     reasons.push("image_quality_warning");
   }
+  if (input.weather) {
+    const weatherImpact = getWeatherSpoilageImpact({
+      daysLeft,
+      location: input.location,
+      name: input.name,
+      weather: input.weather,
+    });
+    score += weatherImpact.scoreDelta;
+    reasons.push(...weatherImpact.reasons);
+  }
 
   const normalizedScore = clampScore(score);
   return {
@@ -64,6 +75,61 @@ export function computeSpoilageRisk(input: SpoilageRiskInput): SpoilageRiskDto {
     daysLeft,
     reasons: Array.from(new Set(reasons)),
     recommendation: recommendationFromRisk(normalizedScore, daysLeft, input.location),
+  };
+}
+
+export function getWeatherSpoilageImpact(input: {
+  daysLeft: number;
+  location: StorageLocation;
+  name: string;
+  weather: SpoilageWeatherContextDto;
+}): {
+  adjustedDaysLeft: number;
+  recommendation: string;
+  reasons: SpoilageRiskDto["reasons"];
+  scoreDelta: number;
+} {
+  const sensitive = sensitiveFoodPatterns.some((pattern) => pattern.test(input.name));
+  const roomTempFriendly = roomTempFriendlyPatterns.some((pattern) => pattern.test(input.name));
+  const reasons: SpoilageRiskDto["reasons"] = [];
+  let scoreDelta = 0;
+  let dayPenalty = 0;
+
+  if (input.weather.source === "seasonal_fallback") {
+    reasons.push("weather_unavailable");
+  }
+
+  if (input.weather.temperatureC >= 28) {
+    reasons.push("hot_weather");
+    dayPenalty += input.location === "실온" ? 2 : input.location === "냉장" ? 1 : 0;
+    scoreDelta += input.location === "실온" ? 0.18 : input.location === "냉장" && sensitive ? 0.08 : 0;
+  }
+  if (input.weather.relativeHumidity >= 75) {
+    reasons.push("humid_weather");
+    dayPenalty += input.location === "실온" ? 1 : 0;
+    scoreDelta += input.location === "실온" ? 0.12 : input.location === "냉장" && sensitive ? 0.04 : 0;
+  }
+  if (input.weather.season === "summer" || input.weather.riskLevel === "high") {
+    reasons.push("warm_season");
+    dayPenalty += input.location === "실온" && !roomTempFriendly ? 1 : 0;
+    scoreDelta += input.location === "실온" && !roomTempFriendly ? 0.08 : 0;
+  }
+
+  if (input.location === "냉동") {
+    scoreDelta = Math.min(scoreDelta, 0.02);
+    dayPenalty = 0;
+  }
+  if (roomTempFriendly && input.location === "실온") {
+    scoreDelta = Math.max(0, scoreDelta - 0.06);
+    dayPenalty = Math.max(0, dayPenalty - 1);
+  }
+
+  const adjustedDaysLeft = input.daysLeft - Math.max(dayPenalty, input.weather.freshnessWindowAdjustmentDays);
+  return {
+    adjustedDaysLeft,
+    recommendation: weatherRecommendation(input.weather, input.location, sensitive, adjustedDaysLeft),
+    reasons: Array.from(new Set(reasons)),
+    scoreDelta: Number(clampScore(scoreDelta).toFixed(2)),
   };
 }
 
@@ -89,6 +155,22 @@ function recommendationFromRisk(score: number, daysLeft: number, location: Stora
   if (score >= 0.6) return "1-2일 안에 우선 사용하세요.";
   if (score >= 0.35) return location === "냉동" ? "냉동 보관 상태를 유지하세요." : "이번 주 안에 사용하세요.";
   return "현재 보관 위험은 낮습니다.";
+}
+
+function weatherRecommendation(
+  weather: SpoilageWeatherContextDto,
+  location: StorageLocation,
+  sensitive: boolean,
+  adjustedDaysLeft: number,
+): string {
+  if (adjustedDaysLeft < 0) return "현재 날씨 기준으로 상태 확인과 폐기 여부 판단이 필요합니다.";
+  if (weather.riskLevel === "high" && location === "실온") {
+    return "고온다습 상태입니다. 실온 보관 재료는 냉장 이동 또는 당일 사용을 권장합니다.";
+  }
+  if (weather.riskLevel !== "normal" && sensitive) {
+    return "민감 식재료는 오늘 상태 확인 후 우선 조리하세요.";
+  }
+  return "날씨 영향은 크지 않지만 보관 위치와 소비기한을 유지하세요.";
 }
 
 function clampScore(value: number): number {

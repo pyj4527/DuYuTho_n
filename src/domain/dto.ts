@@ -231,8 +231,51 @@ export type SpoilageRiskDto = {
     | "freezer_safe"
     | "low_confidence"
     | "image_quality_warning"
+    | "hot_weather"
+    | "humid_weather"
+    | "warm_season"
+    | "weather_unavailable"
   >;
   recommendation: string;
+};
+
+export type WeatherSeasonDto = "spring" | "summer" | "autumn" | "winter";
+
+export type SpoilageWeatherContextDto = {
+  observedAt: string;
+  source: "open_meteo" | "seasonal_fallback";
+  locationLabel: string;
+  temperatureC: number;
+  relativeHumidity: number;
+  season: WeatherSeasonDto;
+  riskLevel: "normal" | "elevated" | "high";
+  freshnessWindowAdjustmentDays: number;
+  recommendation: string;
+};
+
+export type InventorySpoilageRiskItemDto = {
+  item: InventoryItemDto;
+  spoilageRisk: SpoilageRiskDto;
+  weatherImpact: {
+    scoreDelta: number;
+    adjustedDaysLeft: number;
+    reasons: SpoilageRiskDto["reasons"];
+    recommendation: string;
+  };
+};
+
+export type InventorySpoilageRiskReportDto = {
+  generatedAt: string;
+  weather: SpoilageWeatherContextDto;
+  summary: {
+    totalItemsCount: number;
+    highRiskCount: number;
+    criticalRiskCount: number;
+    weatherRiskLevel: SpoilageWeatherContextDto["riskLevel"];
+    title: string;
+    body: string;
+  };
+  items: InventorySpoilageRiskItemDto[];
 };
 
 export type LensCandidateDto = {
@@ -580,6 +623,11 @@ export type NotificationDispatchResultDto = {
   failed: number;
   inactiveIds: string[];
   payloads: PushPayload[];
+};
+
+export type SpoilageRiskDispatchResultDto = NotificationDispatchResultDto & {
+  householdsScanned: number;
+  householdsNotified: number;
 };
 
 export type PrototypePersistedStateV2Dto = {
