@@ -53,6 +53,52 @@ export const lensRoute = new Elysia({ prefix: "/lens" })
       detail: { tags: ["Lens"], summary: "Analyze food image with backend AI vision" },
     },
   )
+  .post(
+    "/receipt",
+    ({ body, request, set }) => {
+      const context = getRequestContext(request);
+      return runIdempotentJson({
+        householdId: context.householdId,
+        request,
+        set,
+        body,
+        successStatus: 200,
+        operation: () => lensService.analyzeReceiptImage(
+          context.householdId,
+          body.image,
+          body.metadata,
+        ),
+      });
+    },
+    {
+      body: lensAnalyzeImageBodySchema,
+      response: lensAnalyzeResponseSchema,
+      detail: { tags: ["Lens"], summary: "Analyze receipt image with OCR-oriented review guards" },
+    },
+  )
+  .post(
+    "/fridge",
+    ({ body, request, set }) => {
+      const context = getRequestContext(request);
+      return runIdempotentJson({
+        householdId: context.householdId,
+        request,
+        set,
+        body,
+        successStatus: 200,
+        operation: () => lensService.analyzeFridgeImage(
+          context.householdId,
+          body.image,
+          body.metadata,
+        ),
+      });
+    },
+    {
+      body: lensAnalyzeImageBodySchema,
+      response: lensAnalyzeResponseSchema,
+      detail: { tags: ["Lens"], summary: "Analyze fridge image with duplicate and confidence review guards" },
+    },
+  )
   .get(
     "/analyses/:analysisId",
     ({ params, request }) => lensService.getAnalysis(getRequestContext(request).householdId, params.analysisId),

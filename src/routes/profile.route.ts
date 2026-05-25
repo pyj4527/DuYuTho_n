@@ -1,11 +1,14 @@
 import { Elysia } from "elysia";
 import { getRequestContext } from "../lib/request-context";
 import { householdService } from "../services/household.service";
+import { recipeService } from "../services/recipe.service";
 import {
   clientPreferenceBodySchema,
   householdSettingsPatchBodySchema,
   householdSettingsSchema,
   profilePatchBodySchema,
+  recipePreferencePatchBodySchema,
+  recipePreferenceSchema,
 } from "../schemas/api.schema";
 
 export const profileRoute = new Elysia()
@@ -48,5 +51,22 @@ export const profileRoute = new Elysia()
     {
       body: clientPreferenceBodySchema,
       detail: { tags: ["Profile"], summary: "Sync client preferences" },
+    },
+  )
+  .get(
+    "/me/recipe-preferences",
+    ({ request }) => recipeService.getRecipePreferences(getRequestContext(request).householdId),
+    {
+      response: recipePreferenceSchema,
+      detail: { tags: ["Profile"], summary: "Fetch recipe personalization preferences" },
+    },
+  )
+  .put(
+    "/me/recipe-preferences",
+    ({ body, request }) => recipeService.updateRecipePreferences(getRequestContext(request).householdId, body),
+    {
+      body: recipePreferencePatchBodySchema,
+      response: recipePreferenceSchema,
+      detail: { tags: ["Profile"], summary: "Update recipe personalization preferences" },
     },
   );

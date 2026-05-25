@@ -422,6 +422,28 @@ export const lensService = {
     };
   },
 
+  async analyzeReceiptImage(
+    householdId: string,
+    image: File,
+    metadataRaw: string | Record<string, unknown> | undefined,
+  ): Promise<LensAnalyzeResponseDto> {
+    const response = await this.analyzeImage(householdId, image, metadataRaw);
+    const reviewed = applyLensModeReview(response, "receipt");
+    await persistLensResponseReview(householdId, reviewed);
+    return reviewed;
+  },
+
+  async analyzeFridgeImage(
+    householdId: string,
+    image: File,
+    metadataRaw: string | Record<string, unknown> | undefined,
+  ): Promise<LensAnalyzeResponseDto> {
+    const response = await this.analyzeImage(householdId, image, metadataRaw);
+    const reviewed = applyLensModeReview(response, "fridge");
+    await persistLensResponseReview(householdId, reviewed);
+    return reviewed;
+  },
+
   async getAnalysis(householdId: string, analysisId: string) {
     const analysis = await prisma.lensAnalysis.findFirst({
       where: { id: analysisId, householdId },
@@ -443,6 +465,43 @@ export const lensService = {
     };
   },
 };
+
+function applyLensModeReview(response: LensAnalyzeResponseDto, mode: "receipt" | "fridge"): LensAnalyzeResponseDto {
+  const candidates = response.candidates.map((candidate) => {
+    const reviewReasons = new Set(candidate.reviewReasons ?? []);
+    if (mode === "receipt" && !candidate.sourceText) {
+      reviewReasons.add("missing_expiry");
+    }
+    if (mode === "fridge" && (candidate.confidence ?? 1) < 0.78) {
+      reviewReasons.add("low_confidence");
+    }
+    return {
+      ...candidate,
+      needsReview: candidate.needsReview || reviewReasons.size > 0 || undefined,
+      reviewReasons: reviewReasons.size > 0 ? Array.from(reviewReasons) : undefined,
+    };
+  });
+
+  return {
+    ...response,
+    status: candidates.some((candidate) => candidate.needsReview) ? "needs_review" : response.status,
+    candidates,
+    provider: response.provider
+      ? { ...response.provider, name: `${response.provider.name}-${mode}` }
+      : { name: `lens-${mode}` },
+  };
+}
+
+async function persistLensResponseReview(householdId: string, response: LensAnalyzeResponseDto): Promise<void> {
+  await prisma.lensAnalysis.updateMany({
+    where: { id: response.analysisId, householdId },
+    data: {
+      status: response.status,
+      result: toInputJsonObject(response),
+      providerName: response.provider?.name,
+    },
+  });
+}
 
 function parseLensNaturalTextMany(rawText: string, baseDate: Date): LensCandidateDto[] {
   return splitNaturalTextSegments(rawText)
