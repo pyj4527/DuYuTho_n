@@ -2,6 +2,7 @@ import { Elysia } from "elysia";
 import { runIdempotentJson } from "../lib/idempotency";
 import { getRequestContext } from "../lib/request-context";
 import { inventoryService } from "../services/inventory.service";
+import { spoilageRiskService } from "../services/spoilage-risk.service";
 import {
   inventoryBatchCreateBodySchema,
   inventoryBatchCreateResultSchema,
@@ -15,6 +16,7 @@ import {
   inventoryPageSchema,
   inventoryPatchBodySchema,
   inventoryReviewStateBodySchema,
+  inventorySpoilageRiskReportSchema,
   inventorySelectionSchema,
   inventorySelectionUpdateBodySchema,
   itemIdParamsSchema,
@@ -78,6 +80,14 @@ export const inventoryRoute = new Elysia({ prefix: "/inventory" })
       body: inventoryMergePreviewBodySchema,
       response: inventoryMergePreviewSchema,
       detail: { tags: ["Inventory"], summary: "Preview duplicate and quantity merge candidates" },
+    },
+  )
+  .get(
+    "/spoilage-risks",
+    ({ request }) => spoilageRiskService.getReport(getRequestContext(request).householdId),
+    {
+      response: inventorySpoilageRiskReportSchema,
+      detail: { tags: ["Inventory"], summary: "Weather-adjusted dynamic spoilage risk report" },
     },
   )
   .get(

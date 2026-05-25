@@ -1125,7 +1125,7 @@ async function analyzeImageWithOpenAI(
             },
             {
               type: "image_url",
-              image_url: { url: dataUri, detail: "high" },
+              image_url: { url: dataUri, detail: getOpenAIVisionDetail() },
             },
           ],
         },
@@ -1172,6 +1172,11 @@ async function analyzeImageWithOpenAI(
     }
     return null;
   }
+}
+
+function getOpenAIVisionDetail(): "low" | "high" | "auto" {
+  const detail = process.env.OPENAI_VISION_DETAIL?.trim();
+  return detail === "high" || detail === "auto" ? detail : "low";
 }
 
 function getItemsArray(parsed: Record<string, unknown> | null): Record<string, unknown>[] {
