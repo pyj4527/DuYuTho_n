@@ -51,6 +51,70 @@ sync_tree() {
     "$source_dir/" "$target_dir/"
 }
 
+read_env_value() {
+  local env_file="$1"
+  local key="$2"
+
+  if [ ! -f "$env_file" ]; then
+    return 0
+  fi
+
+  local value
+  value="$(grep -E "^${key}=" "$env_file" | tail -n 1 | cut -d= -f2- || true)"
+  value="${value%\"}"
+  value="${value#\"}"
+  printf '%s' "$value"
+}
+
+require_env_value() {
+  local env_file="$1"
+  local key="$2"
+  local value
+
+  value="$(read_env_value "$env_file" "$key")"
+  if [ -z "$value" ]; then
+    echo "Missing required env: $key in $env_file" >&2
+    exit 1
+  fi
+}
+
+require_env_equals() {
+  local env_file="$1"
+  local key="$2"
+  local expected="$3"
+  local value
+
+  value="$(read_env_value "$env_file" "$key")"
+  if [ "$value" != "$expected" ]; then
+    echo "Invalid env: $key in $env_file must be $expected" >&2
+    exit 1
+  fi
+}
+
+validate_production_env() {
+  local backend_env="$BACKEND_LIVE/.env"
+  local frontend_env="$FRONTEND_LIVE/.env.production.local"
+
+  require_env_value "$backend_env" CLERK_PUBLISHABLE_KEY
+  require_env_value "$backend_env" CLERK_SECRET_KEY
+  require_env_value "$backend_env" CLERK_AUTHORIZED_PARTIES
+  require_env_value "$backend_env" CORS_ALLOWED_ORIGINS
+  require_env_equals "$backend_env" ALLOW_ANONYMOUS_HOUSEHOLD false
+
+  require_env_value "$frontend_env" VITE_CLERK_PUBLISHABLE_KEY
+  require_env_equals "$frontend_env" VITE_ALLOW_ANONYMOUS_BACKEND false
+
+  local backend_publishable_key
+  local frontend_publishable_key
+  backend_publishable_key="$(read_env_value "$backend_env" CLERK_PUBLISHABLE_KEY)"
+  frontend_publishable_key="$(read_env_value "$frontend_env" VITE_CLERK_PUBLISHABLE_KEY)"
+
+  if [ "$backend_publishable_key" != "$frontend_publishable_key" ]; then
+    echo "Clerk publishable key mismatch between backend and frontend env files" >&2
+    exit 1
+  fi
+}
+
 require_command bun
 require_command git
 require_command rsync
@@ -61,6 +125,7 @@ update_repo "$BACKEND_REPO" "$BACKEND_BRANCH" "$BACKEND_SRC"
 
 sync_tree "$FRONTEND_SRC" "$FRONTEND_LIVE"
 sync_tree "$BACKEND_SRC" "$BACKEND_LIVE"
+validate_production_env
 
 cd "$FRONTEND_LIVE"
 bun install --frozen-lockfile
