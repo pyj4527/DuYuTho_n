@@ -119,6 +119,35 @@ export type InventoryBatchCreateResultDto = {
   duplicateSuggestions?: DuplicateSuggestionDto[];
 };
 
+export type InventoryMergeCandidateDto = InventoryItemCreateDto & {
+  candidateId?: string;
+};
+
+export type InventoryMergePreviewDto = {
+  candidates: InventoryMergeCandidateDto[];
+  duplicateSuggestions: DuplicateSuggestionDto[];
+  mergeGroups: Array<{
+    candidateName: string;
+    existingItemId: string;
+    existingName: string;
+    suggestedQuantity: string;
+    suggestedExpiresAt: string;
+    recommendation: string;
+  }>;
+};
+
+export type InventoryReviewStateUpdateDto = {
+  reviewState: "needs_review" | "confirmed";
+  reasons?: Array<
+    | "low_confidence"
+    | "missing_quantity"
+    | "missing_expiry"
+    | "ambiguous_name"
+    | "duplicate_possible"
+  >;
+  note?: string | null;
+};
+
 export type InventoryListQuery = {
   q?: string;
   location?: StorageLocation;
@@ -259,6 +288,8 @@ export type LensAnalyzeResponseDto = {
   };
 };
 
+export type LensMode = "receipt" | "fridge";
+
 export type LensAnalyzeJobDto = {
   analysisId: string;
   status: "queued" | "processing" | "completed" | "failed";
@@ -379,6 +410,36 @@ export type RecipeConsumptionLogDto = {
   removedItemIds: string[];
 };
 
+export type RecipePreferenceDto = {
+  excludedIngredients: string[];
+  dislikedFoods: string[];
+  allergies: string[];
+  preferredCookTimeMinutes?: number;
+  mildFlavorPreferred?: boolean;
+  recentMeals: RecipeConsumptionLogDto[];
+};
+
+export type RecipePreferenceUpdateDto = Partial<{
+  excludedIngredients: string[];
+  dislikedFoods: string[];
+  allergies: string[];
+  preferredCookTimeMinutes: number | null;
+  mildFlavorPreferred: boolean | null;
+}>;
+
+export type RecipeFeedbackDto = {
+  accepted: true;
+  recipeId: string;
+  action: "cooked" | "not_today" | "disliked";
+  updatedPreferences?: RecipePreferenceDto;
+};
+
+export type RecipeFeedbackRequestDto = {
+  action: "cooked" | "not_today" | "disliked";
+  ingredientNames?: string[];
+  note?: string;
+};
+
 export type HouseholdDto = {
   id: string;
   name: string;
@@ -468,6 +529,57 @@ export type PushPayload = {
   badge?: string;
   tag?: string;
   url?: string;
+};
+
+export type NotificationPreferenceUpdateDto = Partial<{
+  expiryReminderEnabled: boolean;
+  expiryReminderDaysBefore: number[];
+  expiryReminderTime: string;
+  recipeConsumeReminderEnabled: boolean;
+  reviewPendingReminderEnabled: boolean;
+  quietHours: { start: string; end: string } | null;
+}>;
+
+export type NotificationPreferenceResponseDto = NotificationPreferenceDto & {
+  recommendedTime: string;
+  recommendationReason: string;
+};
+
+export type NotificationPreviewDto = {
+  generatedAt: string;
+  recommendedTime: string;
+  summary: {
+    todayCount: number;
+    overdueCount: number;
+    soonCount: number;
+    needsReviewCount: number;
+    title: string;
+    body: string;
+  };
+  items: Array<{
+    id: string;
+    name: string;
+    expiresAt: string;
+    daysLeft: number;
+    bucket: "today" | "overdue" | "soon";
+  }>;
+  nextNotifications: Array<{
+    type: "expiry_reminder" | "expiry_overdue" | "today_summary" | "review_pending";
+    scheduledLocalTime: string;
+    title: string;
+    body: string;
+    tag: string;
+    url: string;
+  }>;
+};
+
+export type NotificationDispatchResultDto = {
+  queued: true;
+  dryRun: boolean;
+  sent: number;
+  failed: number;
+  inactiveIds: string[];
+  payloads: PushPayload[];
 };
 
 export type PrototypePersistedStateV2Dto = {

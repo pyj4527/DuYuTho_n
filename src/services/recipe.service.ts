@@ -1,4 +1,4 @@
-import { Prisma } from "../../generated/prisma/client";
+import { Prisma, type HouseholdSettings } from "../../generated/prisma/client";
 import { fallbackRecipes } from "../data/fallback-recipes";
 import type {
   InventoryItemDto,
@@ -7,9 +7,13 @@ import type {
   RecipeConsumeRequestDto,
   RecipeConsumeResultDto,
   RecipeDto,
+  RecipeFeedbackDto,
+  RecipeFeedbackRequestDto,
   RecipeIngredientDto,
   RecipeIngredientMatchDto,
   RecipeListQuery,
+  RecipePreferenceDto,
+  RecipePreferenceUpdateDto,
   RecipeRecommendationDto,
   RecipeConsumptionLogDto,
   RecipeStepDto,
@@ -62,10 +66,23 @@ export const recipeService = {
         conditions,
       );
     }
-    const recommendations = await rerankRecommendationsWithOpenAI(
+    const preferenceSettings = await getRecipePreferenceSettings(householdId);
+    const recentMeals = await getRecentRecipeConsumptionLogs(householdId, 20);
+    const personalizedRecommendations = personalizeRecipeRecommendations(
       deterministicRecommendations,
       accessibleItems,
-      conditions,
+      preferenceSettings,
+      recentMeals,
+    );
+    const recommendations = personalizeRecipeRecommendations(
+      await rerankRecommendationsWithOpenAI(
+        personalizedRecommendations,
+        accessibleItems,
+        conditions,
+      ),
+      accessibleItems,
+      preferenceSettings,
+      recentMeals,
     );
 
     const limit = normalizeLimit(query.limit);
@@ -84,6 +101,13 @@ export const recipeService = {
         nextCursor: hasMore && last ? last.recipe.id : null,
       },
     };
+  },
+
+  async listPersonalizedRecommendations(
+    householdId: string,
+    query: RecipeListQuery = {},
+  ): Promise<PageDto<RecipeRecommendationDto>> {
+    return this.listRecipes(householdId, query);
   },
 
   async getRecipe(
@@ -136,6 +160,96 @@ export const recipeService = {
     return {
       ...recipe,
       saved,
+    };
+  },
+
+  async getRecipePreferences(householdId: string): Promise<RecipePreferenceDto> {
+    const household = await ensureHousehold(householdId);
+    const recentMeals = await getRecentRecipeConsumptionLogs(householdId, 10);
+
+    return recipePreferenceFromSettings(household.settings, recentMeals);
+  },
+
+  async updateRecipePreferences(
+    householdId: string,
+    input: RecipePreferenceUpdateDto,
+  ): Promise<RecipePreferenceDto> {
+    await ensureHousehold(householdId);
+    const data: Prisma.HouseholdSettingsUpdateInput = {};
+
+    if (input.excludedIngredients !== undefined) {
+      data.excludedIngredients = normalizePreferenceTerms(input.excludedIngredients);
+    }
+    if (input.dislikedFoods !== undefined) {
+      data.dislikedFoods = normalizePreferenceTerms(input.dislikedFoods);
+    }
+    if (input.allergies !== undefined) {
+      data.allergies = normalizePreferenceTerms(input.allergies);
+    }
+    if (input.preferredCookTimeMinutes !== undefined) {
+      data.preferredCookTimeMinutes = input.preferredCookTimeMinutes === null
+        ? null
+        : normalizePreferredCookTime(input.preferredCookTimeMinutes);
+    }
+    if (input.mildFlavorPreferred !== undefined) {
+      data.mildFlavorPreferred = input.mildFlavorPreferred;
+    }
+
+    if (Object.keys(data).length > 0) {
+      await prisma.householdSettings.update({ where: { householdId }, data });
+    }
+
+    return this.getRecipePreferences(householdId);
+  },
+
+  async recordFeedback(
+    householdId: string,
+    recipeId: string,
+    input: RecipeFeedbackRequestDto,
+  ): Promise<RecipeFeedbackDto> {
+    await ensureHousehold(householdId);
+    const recipe = await findRecipeOrThrow(householdId, recipeId);
+
+    if (input.action === "cooked") {
+      await prisma.recipeConsumptionLog.create({
+        data: {
+          householdId,
+          recipeId,
+          recipeName: recipe.name,
+          consumedAt: new Date(),
+          selectedIngredientIds: await getStoredSelectedIds(householdId),
+          updatedItemIds: [],
+          removedItemIds: [],
+        },
+      });
+    }
+
+    if (input.action === "disliked") {
+      const settings = await prisma.householdSettings.findUnique({ where: { householdId } });
+      if (!settings) {
+        throwProblem({ status: 404, title: "Not found", detail: "Household settings not found" });
+      }
+      const nextDislikedFoods = normalizePreferenceTerms([
+        ...settings.dislikedFoods,
+        ...(input.ingredientNames?.length ? input.ingredientNames : [recipe.name]),
+      ]);
+      await prisma.householdSettings.update({
+        where: { householdId },
+        data: { dislikedFoods: nextDislikedFoods },
+      });
+
+      return {
+        accepted: true,
+        recipeId,
+        action: input.action,
+        updatedPreferences: await this.getRecipePreferences(householdId),
+      };
+    }
+
+    return {
+      accepted: true,
+      recipeId,
+      action: input.action,
     };
   },
 
@@ -285,6 +399,177 @@ export function getAccessibleRecipeInventoryItems(
 
   const selectedSet = new Set(selectedIngredientIds);
   return activeItems.filter((item) => selectedSet.has(item.id));
+}
+
+type RecipePreferenceSettings = Pick<
+  RecipePreferenceDto,
+  "excludedIngredients" | "dislikedFoods" | "allergies" | "preferredCookTimeMinutes" | "mildFlavorPreferred"
+>;
+
+export function personalizeRecipeRecommendations(
+  recommendations: RecipeRecommendationDto[],
+  inventoryItems: InventoryItemDto[],
+  preferences: RecipePreferenceSettings,
+  recentMeals: RecipeConsumptionLogDto[] = [],
+): RecipeRecommendationDto[] {
+  const blockedTerms = normalizePreferenceTerms([
+    ...preferences.excludedIngredients,
+    ...preferences.allergies,
+    ...preferences.dislikedFoods,
+  ]);
+  const itemById = new Map(inventoryItems.map((item) => [item.id, item]));
+  const recentRecipeNames = recentMeals.map((meal) => normalizePreferenceTerm(meal.recipeName));
+
+  return recommendations
+    .filter((recommendation) => !recommendationContainsBlockedTerm(recommendation, blockedTerms))
+    .map((recommendation) => {
+      const expiringMatches = recommendation.match.ingredients.filter((ingredient) => {
+        if (!ingredient.itemId) return false;
+        const item = itemById.get(ingredient.itemId);
+        if (!item) return false;
+        const daysLeft = calculateDaysLeft(item.expiresAt);
+        return daysLeft <= 2;
+      }).length;
+      const timeMinutes = recommendation.recipe.timeMinutes ?? Number.parseInt(recommendation.recipe.time, 10);
+      const preferredTime = preferences.preferredCookTimeMinutes;
+      const normalizedRecipeName = normalizePreferenceTerm(recommendation.recipe.name);
+      const wasRecentlyCooked = recentRecipeNames.includes(normalizedRecipeName);
+      const mildMatch = preferences.mildFlavorPreferred
+        ? recommendation.recipe.tags?.some((tag) => ["kid_friendly", "mild", "no_heat", "simple"].includes(tag)) ?? false
+        : false;
+      const reasons = [
+        ...recommendation.reasons,
+        expiringMatches > 0 ? `임박 재료 ${expiringMatches}개 우선 사용` : undefined,
+        preferredTime !== undefined && Number.isFinite(timeMinutes) && timeMinutes <= preferredTime
+          ? `선호 조리시간 ${preferredTime}분 이내`
+          : undefined,
+        mildMatch ? "순한 맛 선호 반영" : undefined,
+        wasRecentlyCooked ? "최근 먹은 메뉴라 뒤로 배치" : undefined,
+      ].filter((reason): reason is string => typeof reason === "string");
+
+      const score = buildPersonalizedRecipeScore({
+        recommendation,
+        expiringMatches,
+        timeMinutes,
+        preferredTime,
+        mildMatch,
+        wasRecentlyCooked,
+      });
+
+      return {
+        recommendation: {
+          ...recommendation,
+          reasons: Array.from(new Set(reasons)),
+        },
+        score,
+      };
+    })
+    .sort((left, right) => {
+      if (left.score !== right.score) return right.score - left.score;
+      return left.recommendation.rank - right.recommendation.rank;
+    })
+    .map(({ recommendation }, index) => ({ ...recommendation, rank: index + 1 }));
+}
+
+function buildPersonalizedRecipeScore(input: {
+  recommendation: RecipeRecommendationDto;
+  expiringMatches: number;
+  timeMinutes: number;
+  preferredTime?: number;
+  mildMatch: boolean;
+  wasRecentlyCooked: boolean;
+}): number {
+  const { recommendation, expiringMatches, timeMinutes, preferredTime, mildMatch, wasRecentlyCooked } = input;
+  let score = recommendation.match.selectedCount * 120 +
+    recommendation.match.ownedCount * 60 +
+    recommendation.match.matchPercentage;
+
+  score += expiringMatches * 90;
+  if (preferredTime !== undefined && Number.isFinite(timeMinutes)) {
+    score += timeMinutes <= preferredTime ? 25 : -Math.min(70, timeMinutes - preferredTime);
+  }
+  if (mildMatch) {
+    score += 15;
+  }
+  if (wasRecentlyCooked) {
+    score -= 80;
+  }
+
+  return score;
+}
+
+function recommendationContainsBlockedTerm(
+  recommendation: RecipeRecommendationDto,
+  blockedTerms: string[],
+): boolean {
+  if (blockedTerms.length === 0) {
+    return false;
+  }
+
+  const names = [
+    recommendation.recipe.name,
+    ...recommendation.recipe.ingredients.map((ingredient) => ingredient.name),
+  ].map(normalizePreferenceTerm);
+
+  return names.some((name) => blockedTerms.some((term) => (
+    name.includes(term) || term.includes(name)
+  )));
+}
+
+async function getRecipePreferenceSettings(householdId: string): Promise<RecipePreferenceSettings> {
+  const household = await ensureHousehold(householdId);
+  return recipePreferenceSettingsFromSettings(household.settings);
+}
+
+async function getRecentRecipeConsumptionLogs(
+  householdId: string,
+  take: number,
+): Promise<RecipeConsumptionLogDto[]> {
+  const logs = await prisma.recipeConsumptionLog.findMany({
+    where: { householdId },
+    orderBy: [{ consumedAt: "desc" }, { id: "asc" }],
+    take,
+  });
+
+  return logs.map(mapConsumptionLog);
+}
+
+function recipePreferenceFromSettings(
+  settings: HouseholdSettings,
+  recentMeals: RecipeConsumptionLogDto[],
+): RecipePreferenceDto {
+  return {
+    excludedIngredients: settings.excludedIngredients,
+    dislikedFoods: settings.dislikedFoods,
+    allergies: settings.allergies,
+    preferredCookTimeMinutes: settings.preferredCookTimeMinutes ?? undefined,
+    mildFlavorPreferred: settings.mildFlavorPreferred ?? undefined,
+    recentMeals,
+  };
+}
+
+function recipePreferenceSettingsFromSettings(settings: HouseholdSettings): RecipePreferenceSettings {
+  return {
+    excludedIngredients: settings.excludedIngredients,
+    dislikedFoods: settings.dislikedFoods,
+    allergies: settings.allergies,
+    preferredCookTimeMinutes: settings.preferredCookTimeMinutes ?? undefined,
+    mildFlavorPreferred: settings.mildFlavorPreferred ?? undefined,
+  };
+}
+
+function normalizePreferenceTerms(values: string[]): string[] {
+  return Array.from(
+    new Set(values.map(normalizePreferenceTerm).filter((value) => value.length > 0)),
+  ).slice(0, 50);
+}
+
+function normalizePreferenceTerm(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normalizePreferredCookTime(value: number): number {
+  return Math.min(Math.max(Math.trunc(value), 5), 240);
 }
 
 async function getCatalog(householdId: string): Promise<RecipeDto[]> {

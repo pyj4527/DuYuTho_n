@@ -10,8 +10,11 @@ import {
   inventoryDiscardResultSchema,
   inventoryItemSchema,
   inventoryListQuerySchema,
+  inventoryMergePreviewBodySchema,
+  inventoryMergePreviewSchema,
   inventoryPageSchema,
   inventoryPatchBodySchema,
+  inventoryReviewStateBodySchema,
   inventorySelectionSchema,
   inventorySelectionUpdateBodySchema,
   itemIdParamsSchema,
@@ -65,6 +68,18 @@ export const inventoryRoute = new Elysia({ prefix: "/inventory" })
       detail: { tags: ["Inventory"], summary: "Batch confirm lens/manual candidates" },
     },
   )
+  .post(
+    "/merge-candidates",
+    ({ body, request }) => inventoryService.previewMergeCandidates(
+      getRequestContext(request).householdId,
+      body.candidates,
+    ),
+    {
+      body: inventoryMergePreviewBodySchema,
+      response: inventoryMergePreviewSchema,
+      detail: { tags: ["Inventory"], summary: "Preview duplicate and quantity merge candidates" },
+    },
+  )
   .get(
     "/selections",
     ({ request }) => inventoryService.getSelections(getRequestContext(request).householdId),
@@ -99,6 +114,20 @@ export const inventoryRoute = new Elysia({ prefix: "/inventory" })
       body: inventoryPatchBodySchema,
       response: inventoryItemSchema,
       detail: { tags: ["Inventory"], summary: "Edit inventory item" },
+    },
+  )
+  .patch(
+    "/:itemId/review-state",
+    ({ params, body, request }) => inventoryService.updateReviewState(
+      getRequestContext(request).householdId,
+      params.itemId,
+      body,
+    ),
+    {
+      params: itemIdParamsSchema,
+      body: inventoryReviewStateBodySchema,
+      response: inventoryItemSchema,
+      detail: { tags: ["Inventory"], summary: "Mark inventory item review state" },
     },
   )
   .delete(

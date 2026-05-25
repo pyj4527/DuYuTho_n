@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma";
 import type {
+  PushPayload,
   PushSubscriptionRecordDto,
   PushSubscriptionUpsertRequestDto,
 } from "../domain/dto";
@@ -132,54 +133,43 @@ export const pushService = {
       });
     }
 
-    const payload = JSON.stringify({
+    const payload = {
       title: "잔반제로 - 푸시 테스트",
       body: "푸시 알림이 정상적으로 수신되었습니다.",
       icon: "/icon-192x192.png",
       badge: "/icon-96x96.png",
       tag: "test-push",
       url: "/",
-    });
+    };
 
-    const inactiveIds: string[] = [];
-    let sent = 0;
-    let failed = 0;
-
-    for (const subscription of subscriptions) {
-      const pushSubscription = {
-        endpoint: subscription.endpoint,
-        keys: {
-          p256dh: subscription.p256dh,
-          auth: subscription.auth,
-        },
-      };
-
-      try {
-        await pushClient.sendNotification(pushSubscription, payload);
-        await prisma.pushSubscription.update({
-          where: { id: subscription.id },
-          data: { lastSuccessAt: new Date() },
-        });
-        sent++;
-      } catch (error: unknown) {
-        failed++;
-        const statusCode = getPushErrorStatusCode(error);
-        if (shouldDeactivatePushSubscription(statusCode)) {
-          await prisma.pushSubscription.update({
-            where: { id: subscription.id },
-            data: { active: false, lastFailureAt: new Date() },
-          });
-          inactiveIds.push(subscription.id);
-        } else {
-          await prisma.pushSubscription.update({
-            where: { id: subscription.id },
-            data: { lastFailureAt: new Date() },
-          });
-        }
-      }
-    }
+    const { sent, failed, inactiveIds } = await sendPayloadToSubscriptions(subscriptions, payload, pushClient);
 
     return { queued: true, sent, failed, inactiveIds };
+  },
+
+  async sendPayloadToActiveSubscriptions(
+    householdId: string,
+    payload: PushPayload,
+  ): Promise<{ sent: number; failed: number; inactiveIds: string[] }> {
+    const pushClient = configureWebPushClient();
+    if (!pushClient) {
+      throwProblem({
+        status: 503,
+        title: "Push provider unavailable",
+        detail: "VAPID keys are not configured on the server",
+      });
+    }
+
+    const subscriptions = await prisma.pushSubscription.findMany({
+      where: { householdId, active: true },
+      select: { id: true, endpoint: true, p256dh: true, auth: true },
+    });
+
+    if (subscriptions.length === 0) {
+      return { sent: 0, failed: 0, inactiveIds: [] };
+    }
+
+    return sendPayloadToSubscriptions(subscriptions, payload, pushClient);
   },
 };
 
@@ -210,6 +200,52 @@ function getPushErrorStatusCode(error: unknown): number | undefined {
 
 function shouldDeactivatePushSubscription(statusCode: number | undefined): boolean {
   return statusCode === 400 || statusCode === 403 || statusCode === 404 || statusCode === 410;
+}
+
+async function sendPayloadToSubscriptions(
+  subscriptions: Array<{ id: string; endpoint: string; p256dh: string; auth: string }>,
+  payload: PushPayload,
+  pushClient: typeof import("web-push"),
+): Promise<{ sent: number; failed: number; inactiveIds: string[] }> {
+  const inactiveIds: string[] = [];
+  let sent = 0;
+  let failed = 0;
+
+  for (const subscription of subscriptions) {
+    const pushSubscription = {
+      endpoint: subscription.endpoint,
+      keys: {
+        p256dh: subscription.p256dh,
+        auth: subscription.auth,
+      },
+    };
+
+    try {
+      await pushClient.sendNotification(pushSubscription, JSON.stringify(payload));
+      await prisma.pushSubscription.update({
+        where: { id: subscription.id },
+        data: { lastSuccessAt: new Date() },
+      });
+      sent++;
+    } catch (error: unknown) {
+      failed++;
+      const statusCode = getPushErrorStatusCode(error);
+      if (shouldDeactivatePushSubscription(statusCode)) {
+        await prisma.pushSubscription.update({
+          where: { id: subscription.id },
+          data: { active: false, lastFailureAt: new Date() },
+        });
+        inactiveIds.push(subscription.id);
+      } else {
+        await prisma.pushSubscription.update({
+          where: { id: subscription.id },
+          data: { lastFailureAt: new Date() },
+        });
+      }
+    }
+  }
+
+  return { sent, failed, inactiveIds };
 }
 
 function validateSubscription(input: PushSubscriptionUpsertRequestDto): void {

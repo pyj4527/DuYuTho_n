@@ -10,6 +10,9 @@ import type {
   InventoryItemDto,
   InventoryItemPatchDto,
   InventoryListQuery,
+  InventoryMergeCandidateDto,
+  InventoryMergePreviewDto,
+  InventoryReviewStateUpdateDto,
   InventorySelectionDto,
   InventorySelectionUpdateDto,
   PageDto,
@@ -120,6 +123,44 @@ export const inventoryService = {
     };
   },
 
+  async previewMergeCandidates(
+    householdId: string,
+    candidates: InventoryMergeCandidateDto[],
+  ): Promise<InventoryMergePreviewDto> {
+    await ensureHousehold(householdId);
+    const normalizedCandidates = candidates.map((candidate) => ({
+      ...candidate,
+      name: normalizeName(candidate.name),
+      quantity: normalizeQuantity(candidate.quantity),
+      expiresAt: normalizeExpiresAt(candidate.expiresAt),
+    }));
+    const existing = await prisma.inventoryItem.findMany({
+      where: { householdId, status: "active" },
+      select: { id: true, name: true, location: true, expiresAt: true, quantityLabel: true },
+    });
+    const duplicateSuggestions = buildDuplicateSuggestions(normalizedCandidates, existing);
+    const existingById = new Map(existing.map((item) => [item.id, item]));
+
+    return {
+      candidates: normalizedCandidates,
+      duplicateSuggestions,
+      mergeGroups: duplicateSuggestions.flatMap((suggestion) => {
+        const existingItem = existingById.get(suggestion.existingItemId);
+        const candidate = normalizedCandidates.find((item) => item.name === suggestion.candidateName);
+        if (!existingItem || !candidate) return [];
+
+        return [{
+          candidateName: suggestion.candidateName,
+          existingItemId: suggestion.existingItemId,
+          existingName: suggestion.existingName,
+          suggestedQuantity: mergeQuantityLabels(existingItem.quantityLabel, candidate.quantity),
+          suggestedExpiresAt: [existingItem.expiresAt, candidate.expiresAt].sort()[0] ?? candidate.expiresAt,
+          recommendation: suggestion.recommendation ?? "중복 가능성이 있습니다. 기존 재료와 병합할지 확인하세요.",
+        }];
+      }),
+    };
+  },
+
   async updateItem(
     householdId: string,
     itemId: string,
@@ -168,6 +209,28 @@ export const inventoryService = {
     });
 
     return mapInventoryItem(item);
+  },
+
+  async updateReviewState(
+    householdId: string,
+    itemId: string,
+    input: InventoryReviewStateUpdateDto,
+  ): Promise<InventoryItemDto> {
+    const item = await findInventoryItemOrThrow(householdId, itemId);
+    const reviewMemo = buildReviewMemo(input);
+    const nextMemo = input.reviewState === "confirmed"
+      ? stripReviewMemo(item.memo)
+      : appendReviewMemo(stripReviewMemo(item.memo), reviewMemo);
+
+    const updated = await prisma.inventoryItem.update({
+      where: { id: itemId },
+      data: {
+        memo: nextMemo,
+        version: { increment: 1 },
+      },
+    });
+
+    return mapInventoryItem(updated);
   },
 
   async discardItem(
@@ -446,6 +509,39 @@ function duplicateRiskRecommendation(
 
 function normalizeForDuplicate(value: string): string {
   return value.replace(/\s+/g, "").toLowerCase();
+}
+
+function mergeQuantityLabels(existing: string, candidate: string): string {
+  const parsedExisting = parseQuantityNumberAndUnit(existing);
+  const parsedCandidate = parseQuantityNumberAndUnit(candidate);
+  if (
+    parsedExisting.amount !== null &&
+    parsedCandidate.amount !== null &&
+    parsedExisting.unit &&
+    parsedCandidate.unit &&
+    parsedExisting.unit === parsedCandidate.unit
+  ) {
+    return `${Number((parsedExisting.amount + parsedCandidate.amount).toFixed(2))}${parsedExisting.unit}`;
+  }
+
+  return `${existing} + ${candidate}`;
+}
+
+const reviewMemoPattern = /\n?\[review:[^\]]+\]/g;
+
+function buildReviewMemo(input: InventoryReviewStateUpdateDto): string {
+  const reasons = input.reasons?.length ? input.reasons.join(",") : "manual";
+  const note = input.note?.trim();
+  return `[review:${input.reviewState}:${reasons}${note ? `:${note}` : ""}]`;
+}
+
+function stripReviewMemo(memo: string | null): string | null {
+  const stripped = memo?.replace(reviewMemoPattern, "").trim() ?? "";
+  return stripped || null;
+}
+
+function appendReviewMemo(memo: string | null, reviewMemo: string): string {
+  return [memo, reviewMemo].filter(Boolean).join("\n");
 }
 
 async function removeIdsFromSelection(householdId: string, itemIds: string[]): Promise<string[]> {

@@ -174,6 +174,73 @@ export const inventoryBatchCreateResultSchema = t.Object({
   ),
 });
 
+export const inventoryMergePreviewBodySchema = t.Object(
+  {
+    candidates: t.Array(
+      t.Composite([
+        inventoryCreateBodySchema,
+        t.Object({
+          candidateId: t.Optional(t.String()),
+        }),
+      ]),
+      { minItems: 1, maxItems: 100 },
+    ),
+  },
+  { additionalProperties: false },
+);
+
+export const inventoryMergePreviewSchema = t.Object({
+  candidates: t.Array(
+    t.Composite([
+      inventoryCreateBodySchema,
+      t.Object({
+        candidateId: t.Optional(t.String()),
+      }),
+    ]),
+  ),
+  duplicateSuggestions: t.Array(
+    t.Object({
+      candidateName: t.String(),
+      existingItemId: t.String(),
+      existingName: t.String(),
+      reason: t.Union([
+        t.Literal("same_name"),
+        t.Literal("similar_name"),
+        t.Literal("same_normalized_name"),
+      ]),
+      confidence: t.Number({ minimum: 0, maximum: 1 }),
+      candidateRisk: t.Optional(spoilageRiskSchema),
+      existingRisk: t.Optional(spoilageRiskSchema),
+      recommendation: t.Optional(t.String()),
+    }),
+  ),
+  mergeGroups: t.Array(
+    t.Object({
+      candidateName: t.String(),
+      existingItemId: t.String(),
+      existingName: t.String(),
+      suggestedQuantity: t.String(),
+      suggestedExpiresAt: t.String(),
+      recommendation: t.String(),
+    }),
+  ),
+});
+
+export const inventoryReviewStateBodySchema = t.Object(
+  {
+    reviewState: t.Union([t.Literal("needs_review"), t.Literal("confirmed")]),
+    reasons: t.Optional(t.Array(t.Union([
+      t.Literal("low_confidence"),
+      t.Literal("missing_quantity"),
+      t.Literal("missing_expiry"),
+      t.Literal("ambiguous_name"),
+      t.Literal("duplicate_possible"),
+    ]))),
+    note: t.Optional(nullableString),
+  },
+  { additionalProperties: false },
+);
+
 export const inventorySelectionSchema = t.Object({
   selectedIngredientIds: t.Array(t.String()),
   updatedAt: t.String(),
@@ -460,6 +527,41 @@ export const recipeConsumptionLogPageSchema = t.Object({
   page: pageMetaSchema,
 });
 
+export const recipePreferenceSchema = t.Object({
+  excludedIngredients: t.Array(t.String()),
+  dislikedFoods: t.Array(t.String()),
+  allergies: t.Array(t.String()),
+  preferredCookTimeMinutes: t.Optional(t.Number()),
+  mildFlavorPreferred: t.Optional(t.Boolean()),
+  recentMeals: t.Array(recipeConsumptionLogSchema),
+});
+
+export const recipePreferencePatchBodySchema = t.Partial(
+  t.Object({
+    excludedIngredients: t.Array(t.String()),
+    dislikedFoods: t.Array(t.String()),
+    allergies: t.Array(t.String()),
+    preferredCookTimeMinutes: nullableNumber,
+    mildFlavorPreferred: t.Nullable(t.Boolean()),
+  }),
+);
+
+export const recipeFeedbackBodySchema = t.Object(
+  {
+    action: t.Union([t.Literal("cooked"), t.Literal("not_today"), t.Literal("disliked")]),
+    ingredientNames: t.Optional(t.Array(t.String())),
+    note: t.Optional(t.String({ maxLength: 500 })),
+  },
+  { additionalProperties: false },
+);
+
+export const recipeFeedbackSchema = t.Object({
+  accepted: t.Literal(true),
+  recipeId: t.String(),
+  action: t.Union([t.Literal("cooked"), t.Literal("not_today"), t.Literal("disliked")]),
+  updatedPreferences: t.Optional(recipePreferenceSchema),
+});
+
 export const householdSettingsSchema = t.Object({
   household: t.Object({
     id: t.String(),
@@ -595,6 +697,81 @@ export const pushTestResultSchema = t.Object({
 
 export const vapidPublicKeySchema = t.Object({
   publicKey: t.String(),
+});
+
+export const notificationPreferenceSchema = t.Object({
+  expiryReminderEnabled: t.Boolean(),
+  expiryReminderDaysBefore: t.Array(t.Number()),
+  expiryReminderTime: t.String(),
+  recipeConsumeReminderEnabled: t.Boolean(),
+  reviewPendingReminderEnabled: t.Boolean(),
+  quietHours: t.Optional(t.Object({ start: t.String(), end: t.String() })),
+  recommendedTime: t.String(),
+  recommendationReason: t.String(),
+});
+
+export const notificationPreferencePatchBodySchema = t.Partial(
+  t.Object({
+    expiryReminderEnabled: t.Boolean(),
+    expiryReminderDaysBefore: t.Array(t.Number()),
+    expiryReminderTime: t.String(),
+    recipeConsumeReminderEnabled: t.Boolean(),
+    reviewPendingReminderEnabled: t.Boolean(),
+    quietHours: t.Nullable(t.Object({ start: t.String(), end: t.String() })),
+  }),
+);
+
+export const notificationPreviewSchema = t.Object({
+  generatedAt: t.String(),
+  recommendedTime: t.String(),
+  summary: t.Object({
+    todayCount: t.Number(),
+    overdueCount: t.Number(),
+    soonCount: t.Number(),
+    needsReviewCount: t.Number(),
+    title: t.String(),
+    body: t.String(),
+  }),
+  items: t.Array(t.Object({
+    id: t.String(),
+    name: t.String(),
+    expiresAt: t.String(),
+    daysLeft: t.Number(),
+    bucket: t.Union([t.Literal("today"), t.Literal("overdue"), t.Literal("soon")]),
+  })),
+  nextNotifications: t.Array(t.Object({
+    type: t.Union([
+      t.Literal("expiry_reminder"),
+      t.Literal("expiry_overdue"),
+      t.Literal("today_summary"),
+      t.Literal("review_pending"),
+    ]),
+    scheduledLocalTime: t.String(),
+    title: t.String(),
+    body: t.String(),
+    tag: t.String(),
+    url: t.String(),
+  })),
+});
+
+export const notificationDispatchBodySchema = t.Object({
+  dryRun: t.Optional(t.Boolean()),
+});
+
+export const notificationDispatchResultSchema = t.Object({
+  queued: t.Literal(true),
+  dryRun: t.Boolean(),
+  sent: t.Number(),
+  failed: t.Number(),
+  inactiveIds: t.Array(t.String()),
+  payloads: t.Array(t.Object({
+    title: t.Optional(t.String()),
+    body: t.Optional(t.String()),
+    icon: t.Optional(t.String()),
+    badge: t.Optional(t.String()),
+    tag: t.Optional(t.String()),
+    url: t.Optional(t.String()),
+  })),
 });
 
 export const prototypeImportBodySchema = t.Object({

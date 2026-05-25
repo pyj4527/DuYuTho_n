@@ -8,6 +8,8 @@ import {
   recipeConsumeBodySchema,
   recipeConsumeResultSchema,
   recipeConsumptionLogPageSchema,
+  recipeFeedbackBodySchema,
+  recipeFeedbackSchema,
   recipeDtoSchema,
   recipeImportBodySchema,
   recipeIdParamsSchema,
@@ -29,6 +31,21 @@ export const recipeRoute = new Elysia({ prefix: "/recipes" })
       query: recipeListQuerySchema,
       response: recipePageSchema,
       detail: { tags: ["Recipes"], summary: "List recipe recommendations" },
+    },
+  )
+  .get(
+    "/recommendations",
+    ({ query, request }) => recipeService.listPersonalizedRecommendations(
+      getRequestContext(request).householdId,
+      {
+        ...query,
+        conditions: query.conditions?.filter(isRecipeConditionKey),
+      },
+    ),
+    {
+      query: recipeListQuerySchema,
+      response: recipePageSchema,
+      detail: { tags: ["Recipes"], summary: "List inventory-based personalized recipe recommendations" },
     },
   )
   .get(
@@ -117,6 +134,30 @@ export const recipeRoute = new Elysia({ prefix: "/recipes" })
       body: recipeConsumeBodySchema,
       response: recipeConsumeResultSchema,
       detail: { tags: ["Recipes"], summary: "Complete recipe and reduce inventory" },
+    },
+  )
+  .post(
+    "/:recipeId/feedback",
+    ({ params, body, request, set }) => {
+      const context = getRequestContext(request);
+      return runIdempotentJson({
+        householdId: context.householdId,
+        request,
+        set,
+        body: { ...body, recipeId: params.recipeId },
+        successStatus: 200,
+        operation: () => recipeService.recordFeedback(
+          context.householdId,
+          params.recipeId,
+          body,
+        ),
+      });
+    },
+    {
+      params: recipeIdParamsSchema,
+      body: recipeFeedbackBodySchema,
+      response: recipeFeedbackSchema,
+      detail: { tags: ["Recipes"], summary: "Record recipe feedback for personalization" },
     },
   );
 
