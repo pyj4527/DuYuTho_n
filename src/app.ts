@@ -164,10 +164,68 @@ function applySecurityHeaders(headers: Record<string, string | number | string[]
   headers["x-content-type-options"] = "nosniff";
   headers["referrer-policy"] = "strict-origin-when-cross-origin";
   headers["permissions-policy"] = "camera=(self), microphone=(), geolocation=()";
-  headers["content-security-policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https: https://cloudflareinsights.com; worker-src 'self'; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
+  headers["content-security-policy"] = getContentSecurityPolicy();
   if (process.env.NODE_ENV === "production") {
     headers["strict-transport-security"] = "max-age=31536000; includeSubDomains";
   }
+}
+
+function getContentSecurityPolicy(): string {
+  const clerkFrontendApiOrigin = getClerkFrontendApiOrigin();
+  const clerkScriptSources = [
+    "'self'",
+    "'unsafe-inline'",
+    "https://static.cloudflareinsights.com",
+    "https://challenges.cloudflare.com",
+    clerkFrontendApiOrigin,
+  ].filter(Boolean);
+
+  const clerkConnectSources = [
+    "'self'",
+    "https:",
+    "https://cloudflareinsights.com",
+    clerkFrontendApiOrigin,
+  ].filter(Boolean);
+
+  return [
+    "default-src 'self'",
+    `script-src ${clerkScriptSources.join(" ")}`,
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com",
+    "img-src 'self' data: blob: https: https://img.clerk.com",
+    `connect-src ${clerkConnectSources.join(" ")}`,
+    "worker-src 'self' blob:",
+    "frame-src 'self' https://challenges.cloudflare.com",
+    "manifest-src 'self'",
+    "media-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+}
+
+function getClerkFrontendApiOrigin(): string | undefined {
+  const publishableKey = process.env.CLERK_PUBLISHABLE_KEY?.trim();
+  if (!publishableKey) return undefined;
+
+  const encodedFrontendApi = publishableKey.split("_")[2];
+  if (!encodedFrontendApi) return undefined;
+
+  try {
+    const decoded = Buffer.from(toBase64(encodedFrontendApi), "base64").toString("utf8");
+    const hostname = decoded.endsWith("$") ? decoded.slice(0, -1) : decoded;
+    if (!hostname || hostname.includes("/") || !hostname.includes(".")) return undefined;
+    return `https://${hostname}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function toBase64(base64Url: string): string {
+  const normalized = base64Url.replaceAll("-", "+").replaceAll("_", "/");
+  const paddingLength = (4 - (normalized.length % 4)) % 4;
+  return `${normalized}${"=".repeat(paddingLength)}`;
 }
 
 function applyCorsHeaders(request: Request, headers: Record<string, string | number | string[]>): void {
