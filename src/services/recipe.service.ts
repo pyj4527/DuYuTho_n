@@ -37,33 +37,34 @@ export const recipeService = {
     const selectedIds = query.selectedIngredientIds?.length
       ? query.selectedIngredientIds
       : await getStoredSelectedIds(householdId);
+    const accessibleItems = getAccessibleRecipeInventoryItems(activeItems, selectedIds);
     const selectedSet = new Set(selectedIds);
     const conditions = normalizeConditions(query.conditions);
     if (query.mode !== "saved") {
-      await maybeBackfillCrawledRecipes(householdId, activeItems, selectedIds, query);
+      await maybeBackfillCrawledRecipes(householdId, accessibleItems, selectedIds, query);
     }
     let catalog = await getCatalog(householdId);
     let deterministicRecommendations = buildDeterministicRecommendations(
       catalog,
       query,
-      activeItems,
+      accessibleItems,
       selectedSet,
       conditions,
     );
-    if (query.mode !== "saved" && activeItems.length > 0 && deterministicRecommendations.length === 0) {
-      await maybeBackfillInventoryGeneratedRecipes(householdId, activeItems, conditions);
+    if (query.mode !== "saved" && accessibleItems.length > 0 && deterministicRecommendations.length === 0) {
+      await maybeBackfillInventoryGeneratedRecipes(householdId, accessibleItems, conditions);
       catalog = await getCatalog(householdId);
       deterministicRecommendations = buildDeterministicRecommendations(
         catalog,
         query,
-        activeItems,
+        accessibleItems,
         selectedSet,
         conditions,
       );
     }
     const recommendations = await rerankRecommendationsWithOpenAI(
       deterministicRecommendations,
-      activeItems,
+      accessibleItems,
       conditions,
     );
 
@@ -92,11 +93,13 @@ export const recipeService = {
   ): Promise<RecipeRecommendationDto> {
     const recipe = await findRecipeOrThrow(householdId, recipeId);
     const activeItems = await getActiveInventoryDtos(householdId);
-    const selectedSet = new Set(selectedIngredientIds.length > 0
+    const selectedIds = selectedIngredientIds.length > 0
       ? selectedIngredientIds
-      : await getStoredSelectedIds(householdId));
+      : await getStoredSelectedIds(householdId);
+    const selectedSet = new Set(selectedIds);
+    const accessibleItems = getAccessibleRecipeInventoryItems(activeItems, selectedIds);
 
-    return buildRecommendation(recipe, activeItems, selectedSet, []);
+    return buildRecommendation(recipe, accessibleItems, selectedSet, []);
   },
 
   async importRecipeFromUrl(
@@ -107,11 +110,13 @@ export const recipeService = {
     await ensureHousehold(householdId);
     const recipe = await importCrawledRecipe(householdId, url);
     const activeItems = await getActiveInventoryDtos(householdId);
-    const selectedSet = new Set(selectedIngredientIds.length > 0
+    const selectedIds = selectedIngredientIds.length > 0
       ? selectedIngredientIds
-      : await getStoredSelectedIds(householdId));
+      : await getStoredSelectedIds(householdId);
+    const selectedSet = new Set(selectedIds);
+    const accessibleItems = getAccessibleRecipeInventoryItems(activeItems, selectedIds);
 
-    return buildRecommendation(recipe, activeItems, selectedSet, []);
+    return buildRecommendation(recipe, accessibleItems, selectedSet, []);
   },
 
   async setSaved(householdId: string, recipeId: string, saved: boolean): Promise<RecipeDto> {
@@ -269,6 +274,18 @@ export const recipeService = {
     };
   },
 };
+
+export function getAccessibleRecipeInventoryItems(
+  activeItems: InventoryItemDto[],
+  selectedIngredientIds: string[],
+): InventoryItemDto[] {
+  if (selectedIngredientIds.length === 0) {
+    return activeItems;
+  }
+
+  const selectedSet = new Set(selectedIngredientIds);
+  return activeItems.filter((item) => selectedSet.has(item.id));
+}
 
 async function getCatalog(householdId: string): Promise<RecipeDto[]> {
   await ensureHousehold(householdId);
