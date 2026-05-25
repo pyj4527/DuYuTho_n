@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PATH="$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
 APP_ROOT="${ZERO_APP_ROOT:-$HOME/apps/zero}"
 BACKEND_BRANCH="${ZERO_BACKEND_BRANCH:-main}"
 BACKEND_LIVE="${ZERO_BACKEND_LIVE:-$APP_ROOT/DuYuTho_n}"
@@ -71,4 +73,3 @@ bun run build
 
 systemctl --user restart "$SERVICE_NAME"
 systemctl --user --no-pager --full status "$SERVICE_NAME" | sed -n '1,18p'
-
